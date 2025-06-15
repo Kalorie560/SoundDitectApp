@@ -92,6 +92,104 @@ def debug_log(message: str, level: str = "info"):
         else:
             st.info(f"🔧 DEBUG: {message}")
 
+def debug_tensor_shape(tensor_name: str, tensor, additional_info: str = ""):
+    """Debug tensor shapes with detailed information"""
+    if tensor is not None:
+        if hasattr(tensor, 'shape'):
+            shape_info = f"{tensor_name}: {tensor.shape}"
+        elif hasattr(tensor, 'size'):
+            shape_info = f"{tensor_name}: {tensor.size()}"
+        else:
+            shape_info = f"{tensor_name}: {type(tensor)}"
+        
+        if additional_info:
+            shape_info += f" | {additional_info}"
+        debug_log(f"📐 SHAPE: {shape_info}")
+        return shape_info
+    else:
+        debug_log(f"📐 SHAPE: {tensor_name}: None")
+        return f"{tensor_name}: None"
+
+def analyze_state_dict_dimensions(state_dict):
+    """Analyze and log all tensor dimensions in state dict"""
+    debug_log("📊 STATE DICT DIMENSION ANALYSIS:")
+    
+    attention_weights = {}
+    cnn_weights = {}
+    classifier_weights = {}
+    
+    for key, value in state_dict.items():
+        if hasattr(value, 'shape'):
+            debug_log(f"  {key}: {value.shape}")
+            
+            if key.startswith('attention.'):
+                attention_weights[key] = value.shape
+            elif key.startswith(('cnn.', 'conv')):
+                cnn_weights[key] = value.shape
+            elif key.startswith(('classifier.', 'fc')):
+                classifier_weights[key] = value.shape
+    
+    return attention_weights, cnn_weights, classifier_weights
+
+def calculate_cnn_output_shape(input_shape, model):
+    """Calculate actual CNN output shape by doing a forward pass"""
+    debug_log(f"🧮 CALCULATING CNN OUTPUT SHAPE with input: {input_shape}")
+    
+    try:
+        with torch.no_grad():
+            dummy_input = torch.randn(*input_shape)
+            debug_tensor_shape("dummy_input", dummy_input)
+            
+            # Pass through CNN layers only
+            x = model.cnn(dummy_input)
+            debug_tensor_shape("cnn_output", x, "before flattening")
+            
+            # Flatten like in forward pass
+            batch_size, channels, length = x.size()
+            x_flat = x.view(batch_size, channels * length)
+            debug_tensor_shape("x_flat", x_flat, "after flattening")
+            
+            return x_flat.shape[1]  # Return flattened dimension
+    except Exception as e:
+        debug_log(f"❌ CNN output calculation failed: {e}", "error")
+        return None
+
+def diagnose_attention_compatibility(model, state_dict):
+    """Comprehensive diagnosis of attention layer compatibility"""
+    debug_log("🔬 ATTENTION COMPATIBILITY DIAGNOSIS:")
+    
+    if not hasattr(model, 'attention') or model.attention is None:
+        debug_log("  No attention layer in model")
+        return True
+    
+    # Check model's attention layer dimensions
+    if hasattr(model.attention, 'query'):
+        query_weight = model.attention.query.weight
+        debug_tensor_shape("model.attention.query.weight", query_weight, "model layer")
+        model_input_dim = query_weight.shape[1]  # Input dimension to query layer
+        model_output_dim = query_weight.shape[0]  # Output dimension from query layer
+        
+        debug_log(f"  Model attention expects INPUT: {model_input_dim}, produces OUTPUT: {model_output_dim}")
+    
+    # Check saved state dict attention dimensions
+    if 'attention.query.weight' in state_dict:
+        saved_weight = state_dict['attention.query.weight']
+        debug_tensor_shape("state_dict attention.query.weight", saved_weight, "saved state")
+        saved_input_dim = saved_weight.shape[1]
+        saved_output_dim = saved_weight.shape[0]
+        
+        debug_log(f"  Saved attention expects INPUT: {saved_input_dim}, produces OUTPUT: {saved_output_dim}")
+        
+        # Check compatibility
+        if model_input_dim != saved_input_dim:
+            debug_log(f"  ❌ INCOMPATIBLE: Model expects {model_input_dim}, saved has {saved_input_dim}", "error")
+            return False
+        else:
+            debug_log(f"  ✅ COMPATIBLE: Both use input dimension {model_input_dim}")
+            return True
+    
+    return True
+
 def safe_execute(func, description: str, *args, **kwargs):
     """Safely execute a function with comprehensive error logging"""
     debug_log(f"Starting: {description}")
@@ -294,32 +392,80 @@ class CNNSequential(nn.Module):
         self.fc_input_size = x * channels[-1]
         
     def forward(self, x):
+        # Debug input shape
+        debug_tensor_shape("input_x", x, "model input")
+        
         x = self.cnn(x)
+        debug_tensor_shape("cnn_output", x, "after CNN layers")
         
         # Apply attention if available
         if self.attention is not None:
+            debug_log("🎯 Applying attention mechanism")
+            
             # Basic attention mechanism
             batch_size, channels, length = x.size()
+            debug_log(f"CNN output dimensions: batch={batch_size}, channels={channels}, length={length}")
+            
             x_flat = x.view(batch_size, channels * length)
+            debug_tensor_shape("x_flat", x_flat, "flattened CNN output for attention")
+            
+            # Debug attention layer expected input size
+            if hasattr(self.attention, 'query') and hasattr(self.attention.query, 'weight'):
+                expected_input_size = self.attention.query.weight.shape[1]
+                debug_log(f"Attention layer expects input size: {expected_input_size}")
+                debug_log(f"Actual flattened CNN output size: {x_flat.shape[1]}")
+                
+                if x_flat.shape[1] != expected_input_size:
+                    debug_log(f"❌ SHAPE MISMATCH DETECTED: CNN output {x_flat.shape[1]} != attention input {expected_input_size}", "error")
+                    # Try to create a projection layer on the fly
+                    if not hasattr(self.attention, 'emergency_projection'):
+                        debug_log("Creating emergency projection layer to fix shape mismatch")
+                        self.attention.emergency_projection = nn.Linear(x_flat.shape[1], expected_input_size)
+                    x_flat = self.attention.emergency_projection(x_flat)
+                    debug_tensor_shape("x_flat_projected", x_flat, "after emergency projection")
             
             # Apply input projection if needed
             if hasattr(self.attention, 'input_projection') and self.attention.input_projection is not None:
+                debug_log("Applying input projection")
                 x_flat = self.attention.input_projection(x_flat)
+                debug_tensor_shape("x_flat_input_projected", x_flat, "after input projection")
             
-            # Attention weights
-            query = self.attention.query(x_flat)
-            key = self.attention.key(x_flat)
-            value = self.attention.value(x_flat)
-            
-            # Scaled dot-product attention
-            attention_weights = torch.softmax(torch.matmul(query, key.transpose(-2, -1)) / (query.size(-1) ** 0.5), dim=-1)
-            x_attended = torch.matmul(attention_weights, value)
-            x = self.attention.output(x_attended)
+            # Attention weights with detailed debugging
+            try:
+                debug_log("Computing query, key, value")
+                query = self.attention.query(x_flat)
+                debug_tensor_shape("query", query, "attention query")
+                
+                key = self.attention.key(x_flat)
+                debug_tensor_shape("key", key, "attention key")
+                
+                value = self.attention.value(x_flat)
+                debug_tensor_shape("value", value, "attention value")
+                
+                # Scaled dot-product attention
+                debug_log("Computing attention weights")
+                attention_weights = torch.softmax(torch.matmul(query, key.transpose(-2, -1)) / (query.size(-1) ** 0.5), dim=-1)
+                debug_tensor_shape("attention_weights", attention_weights, "attention weights")
+                
+                x_attended = torch.matmul(attention_weights, value)
+                debug_tensor_shape("x_attended", x_attended, "after attention")
+                
+                x = self.attention.output(x_attended)
+                debug_tensor_shape("attention_output", x, "final attention output")
+                
+            except Exception as e:
+                debug_log(f"❌ Attention computation failed: {e}", "error")
+                debug_log("Falling back to flattened CNN output without attention", "warning")
+                x = x.view(x.size(0), -1)
+                debug_tensor_shape("x_fallback", x, "fallback without attention")
         else:
             # Flatten for classifier
             x = x.view(x.size(0), -1)
+            debug_tensor_shape("x_no_attention", x, "flattened for classifier")
             
-        return self.classifier(x)
+        classifier_result = self.classifier(x)
+        debug_tensor_shape("classifier_output", classifier_result, "final model output")
+        return classifier_result
 
 # Enhanced Attention module for models that have it
 class MultiHeadAttention(nn.Module):
@@ -666,35 +812,61 @@ def load_model(model_path: str) -> nn.Module:
         debug_log("Step 6: Loading state dict into model (CRITICAL STEP)")
         log_memory_usage("Before State Dict Loading")
         
-        # CRITICAL FIX: Filter out incompatible attention weights before loading
+        # ENHANCED DEBUGGING: Analyze state dict and model dimensions
+        debug_log("📊 COMPREHENSIVE DIMENSION ANALYSIS")
+        attention_weights, cnn_weights, classifier_weights = analyze_state_dict_dimensions(state_dict)
+        
+        # Calculate actual CNN output dimensions
+        if hasattr(model, 'cnn'):
+            actual_cnn_output_size = calculate_cnn_output_shape((1, 1, 44100), model)
+            if actual_cnn_output_size:
+                debug_log(f"🧮 ACTUAL CNN output flattened size: {actual_cnn_output_size}")
+        
+        # Diagnose attention compatibility
+        attention_compatible = True
         if has_attention and hasattr(model, 'attention') and model.attention is not None:
-            debug_log("Filtering out incompatible attention weights from state dict")
+            attention_compatible = diagnose_attention_compatibility(model, state_dict)
+        
+        # ENHANCED FIX: Recreate attention layer with correct dimensions if incompatible
+        if has_attention and not attention_compatible:
+            debug_log("🔧 RECREATING ATTENTION LAYER with correct dimensions", "warning")
+            st.warning("🔧 Recreating attention layer with correct dimensions")
+            
+            # Use actual CNN output size for attention input
+            correct_input_size = actual_cnn_output_size or model.fc_input_size
+            debug_log(f"Creating new attention layer with input size: {correct_input_size}")
+            
+            new_attention, new_attention_error = safe_execute(
+                MultiHeadAttention,
+                "Creating corrected attention layer",
+                input_dim=correct_input_size, num_heads=8
+            )
+            
+            if new_attention_error is None:
+                model.attention = new_attention
+                debug_log(f"✅ Attention layer recreated with input size: {correct_input_size}")
+                st.info(f"✅ Attention layer recreated with input size: {correct_input_size}")
+            else:
+                debug_log(f"Failed to recreate attention: {new_attention_error}", "error")
+                model.attention = None
+                debug_log("Disabling attention mechanism due to recreation failure", "warning")
+        
+        # Filter out ALL attention weights to prevent overriding our corrected layer
+        if has_attention and hasattr(model, 'attention') and model.attention is not None:
+            debug_log("🚫 REMOVING ALL ATTENTION WEIGHTS from state dict to prevent override")
             filtered_state_dict = {}
             attention_keys_removed = []
             
             for key, value in state_dict.items():
                 if key.startswith('attention.'):
-                    # Check if the attention weight dimensions match our model
-                    if key.endswith('.weight'):
-                        if hasattr(model.attention, key.split('.', 1)[1]):
-                            model_weight = getattr(model.attention, key.split('.', 1)[1])
-                            if hasattr(model_weight, 'weight') and model_weight.weight.shape != value.shape:
-                                debug_log(f"Skipping incompatible attention weight {key}: model={model_weight.weight.shape} vs saved={value.shape}")
-                                attention_keys_removed.append(key)
-                                continue
-                    elif key.endswith('.bias'):
-                        # Also skip corresponding bias if weight was skipped
-                        weight_key = key.replace('.bias', '.weight')
-                        if weight_key in attention_keys_removed:
-                            debug_log(f"Skipping corresponding bias {key}")
-                            attention_keys_removed.append(key)
-                            continue
-                
-                filtered_state_dict[key] = value
+                    debug_log(f"Removing attention weight: {key} (shape: {value.shape})")
+                    attention_keys_removed.append(key)
+                else:
+                    filtered_state_dict[key] = value
             
             if attention_keys_removed:
-                debug_log(f"Removed {len(attention_keys_removed)} incompatible attention parameters")
-                st.info(f"Filtered out {len(attention_keys_removed)} incompatible attention parameters")
+                debug_log(f"🚫 Removed {len(attention_keys_removed)} attention parameters to prevent override")
+                st.info(f"🚫 Removed {len(attention_keys_removed)} attention parameters to prevent override")
                 state_dict = filtered_state_dict
         
         # Attempt 1: Strict loading
@@ -770,36 +942,23 @@ def load_model(model_path: str) -> nn.Module:
                     else:
                         debug_log(f"Failed to create fallback attention: {fallback_attention_error}", "warning")
                 
-                # Apply the same attention filter for fallback model
+                # Apply the same enhanced approach for fallback model
                 fallback_state_dict = state_dict
                 if has_attention and hasattr(fallback_model, 'attention') and fallback_model.attention is not None:
-                    debug_log("Filtering out incompatible attention weights for fallback model")
+                    debug_log("🚫 REMOVING ALL ATTENTION WEIGHTS from fallback state dict")
                     filtered_fallback_state_dict = {}
                     fallback_attention_keys_removed = []
                     
                     for key, value in state_dict.items():
                         if key.startswith('attention.'):
-                            # Check if the attention weight dimensions match our fallback model
-                            if key.endswith('.weight'):
-                                if hasattr(fallback_model.attention, key.split('.', 1)[1]):
-                                    model_weight = getattr(fallback_model.attention, key.split('.', 1)[1])
-                                    if hasattr(model_weight, 'weight') and model_weight.weight.shape != value.shape:
-                                        debug_log(f"Skipping incompatible fallback attention weight {key}: model={model_weight.weight.shape} vs saved={value.shape}")
-                                        fallback_attention_keys_removed.append(key)
-                                        continue
-                            elif key.endswith('.bias'):
-                                # Also skip corresponding bias if weight was skipped
-                                weight_key = key.replace('.bias', '.weight')
-                                if weight_key in fallback_attention_keys_removed:
-                                    debug_log(f"Skipping corresponding fallback bias {key}")
-                                    fallback_attention_keys_removed.append(key)
-                                    continue
-                        
-                        filtered_fallback_state_dict[key] = value
+                            debug_log(f"Removing fallback attention weight: {key} (shape: {value.shape})")
+                            fallback_attention_keys_removed.append(key)
+                        else:
+                            filtered_fallback_state_dict[key] = value
                     
                     if fallback_attention_keys_removed:
-                        debug_log(f"Removed {len(fallback_attention_keys_removed)} incompatible fallback attention parameters")
-                        st.info(f"Filtered out {len(fallback_attention_keys_removed)} incompatible fallback attention parameters")
+                        debug_log(f"🚫 Removed {len(fallback_attention_keys_removed)} fallback attention parameters")
+                        st.info(f"🚫 Removed {len(fallback_attention_keys_removed)} fallback attention parameters")
                         fallback_state_dict = filtered_fallback_state_dict
                 
                 fallback_load_result, fallback_load_error = safe_execute(
