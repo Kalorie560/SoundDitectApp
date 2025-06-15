@@ -42,10 +42,10 @@ streamlit run app.py
 
 アプリケーションは以下の仕様のPyTorchモデルを想定しています：
 
-- **入力形状**: `(batch_size, channels, length) = (1, 1, 22050)`
+- **入力形状**: `(batch_size, channels, length) = (1, 1, 44100)` または `(1, 1, 22050)`（自動適応）
 - **出力**: 二値分類（2クラス: OK=0, NG=1）
 - **アーキテクチャ**: `nn.Conv1d`レイヤーを使用した1D CNN
-- **音声フォーマット**: 22050 Hzサンプリングレート、モノラルチャンネル、1秒セグメント
+- **音声フォーマット**: 44.1kHz（訓練設定）または22050 Hzサンプリングレート、モノラルチャンネル、1秒セグメント
 
 ### サポートされるモデルアーキテクチャ
 
@@ -65,10 +65,13 @@ streamlit run app.py
 
 ### 動的モデル読み込み機能 🆕
 
+- **訓練設定完全対応**: 訓練時の設定（44100サンプル、kernel_size=3、stride=[1,2,2]）を自動検出・適用
 - **自動アーキテクチャ適応**: チェックポイントの重みサイズを解析して動的にモデルを構築
-- **柔軟なチャンネル数**: 32→64→128 や 64→128→256 など異なるチャンnel構成に自動対応
-- **可変カーネルサイズ**: kernel_size=3, 128, 256など様々なサイズに対応
+- **柔軟なチャンネル数**: 32→64→128 や 64→128→256 など異なるチャンネル構成に自動対応
+- **可変カーネルサイズ**: kernel_size=3（小カーネル）, 128, 256（大カーネル）など様々なサイズに対応
+- **ストライドパターン検出**: カーネルサイズに基づいてストライド[1,2,2]または[4,2,2]を自動選択
 - **分類器入力サイズ自動調整**: チェックポイントから実際の分類器入力次元を抽出して使用
+- **アテンション対応強化**: MultiHeadAttention（hidden_dim=256, num_heads=8）を自動検出・構築
 - **プログレッシブ読み込み**: 
   1. 厳密読み込み (strict=True)
   2. 部分読み込み (strict=False) 
@@ -79,10 +82,10 @@ streamlit run app.py
 ## 音声処理
 
 アプリは以下を自動で処理します：
-- 22050 Hzへのリサンプリング
+- 22050 Hzへのリサンプリング（表示用）
 - モノラル変換（ステレオ入力の場合）
-- 長さ正規化（22050サンプルへのパディングまたは切り詰め）
-- 1秒セグメントへのリアルタイムチャンク分割
+- 長さ正規化（44100サンプル[訓練設定]または22050サンプルへのパディングまたは切り詰め）
+- 1秒セグメントへのリアルタイムチャンク分割（訓練設定に基づく動的調整）
 
 ## 結果の可視化
 
@@ -110,11 +113,13 @@ streamlit run app.py
 **✅ 自動解決機能**: 
 アプリケーションは2025年6月更新で以下の問題を自動的に解決します：
 
-1. **動的アーキテクチャ適応** 🔧
+1. **訓練設定ベース動的適応** 🔧
+   - 訓練時設定（44100サンプル、64→128→256チャンネル、kernel_size=3、stride=[1,2,2]）を自動検出
    - チェックポイントの重みを解析して適切なモデル構造を自動構築
    - 異なるチャンネル数（32→64→128 vs 64→128→256）に対応
-   - 異なるカーネルサイズ（3 vs 256）に対応
+   - 異なるカーネルサイズ（3 vs 256）とストライドパターンに対応
    - 分類器入力次元の自動検出（例: チェックポイント [512, 256] vs 計算値 [512, 5376] の不整合を解決）
+   - アテンション機構の自動構築（hidden_dim=256, num_heads=8）
 
 2. **プログレッシブ読み込み** 📚
    - 厳密読み込み (strict=True) → 部分読み込み (strict=False) → キーマッピング → レガシー読み込み
@@ -123,13 +128,17 @@ streamlit run app.py
    - `ClientSettings.MediaStreamConstraints.Mode.SENDONLY` → `WebRtcMode.SENDONLY`
 
 **対応状況の確認**: モデル読み込み時にStreamlitアプリで以下のメッセージを確認：
-- "Sequential architecture detected" - Sequential形式のモデル
-- "Individual layer architecture detected" - 個別レイヤー形式のモデル  
+- "Sequential architecture detected - analyzing training configuration" - Sequential形式のモデル
+- "Individual layer architecture detected - analyzing training configuration" - 個別レイヤー形式のモデル  
 - "Attention mechanism detected" - Attention付きモデル
-- "Detected channels: [64, 128, 256], kernel sizes: [3, 3, 3]" - 検出されたアーキテクチャ
+- "Detected channels: [64, 128, 256]" - 検出されたチャンネル構成
+- "Detected kernel sizes: [3, 3, 3]" - 検出されたカーネルサイズ
+- "Detected strides: [1, 2, 2]" - 検出されたストライドパターン
 - "Detected classifier input size: 256" - 分類器入力次元の自動検出
-- "Model loaded successfully with strict loading" - 成功
-- "Non-strict loading completed" - 一部パラメータが初期化される可能性
+- "Detected FC layer sizes: [512, 256]" - FC層サイズの自動検出
+- "Attention hidden dim: 256, heads: 8" - アテンション設定の検出
+- "✅ Model loaded successfully with strict loading" - 成功
+- "✅ Fallback loading with training config successful" - 訓練設定での代替読み込み成功
 
 ### 音声品質の改善
 
