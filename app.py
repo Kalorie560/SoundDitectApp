@@ -1473,6 +1473,25 @@ def main():
                     debug_log(f"⚠️ AudioProcessor functionality test failed: {processor_test_error}", "warning")
                     st.warning(f"AudioProcessor機能テストに失敗しましたが、継続します: {processor_test_error}")
         
+        # Step 1.5: Final validation that AudioProcessor is ready
+        debug_log("Step 1.5: Final AudioProcessor validation before WebRTC initialization")
+        if st.session_state.audio_processor is None:
+            debug_log("❌ CRITICAL: AudioProcessor is None before WebRTC initialization", "error")
+            st.error("❌ AudioProcessorが初期化されていません。")
+            return
+        
+        # Additional validation: Ensure AudioProcessor has required attributes
+        try:
+            if not hasattr(st.session_state.audio_processor, 'recv_audio'):
+                debug_log("❌ AudioProcessor missing recv_audio method", "error")
+                st.error("AudioProcessorに必要なメソッドがありません。")
+                return
+            debug_log("✅ AudioProcessor validation passed - all required methods present")
+        except Exception as validation_error:
+            debug_log(f"❌ AudioProcessor validation failed: {validation_error}", "error")
+            st.error(f"AudioProcessor検証エラー: {validation_error}")
+            return
+        
         # Step 2: Initialize WebRTC streamer with comprehensive safety measures
         debug_log("Step 2: Initializing WebRTC streamer (CRITICAL SECTION)")
         log_memory_usage("Before WebRTC Initialization")
@@ -1535,10 +1554,20 @@ def main():
             # Strategy 1: Full-featured WebRTC with all options
             try:
                 debug_log("Attempting full WebRTC configuration")
+                
+                # Create safe factory function with proper error handling
+                def safe_audio_processor_factory():
+                    if hasattr(st.session_state, 'audio_processor') and st.session_state.audio_processor is not None:
+                        debug_log("Factory: Returning existing audio_processor")
+                        return st.session_state.audio_processor
+                    else:
+                        debug_log("Factory: audio_processor not available in session_state", "error")
+                        raise RuntimeError("audio_processor not initialized in session_state")
+                
                 webrtc_ctx = webrtc_streamer(
                     key="audio-classification",
                     mode=WebRtcMode.SENDONLY,
-                    audio_processor_factory=lambda: st.session_state.audio_processor,
+                    audio_processor_factory=safe_audio_processor_factory,
                     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
                     media_stream_constraints={
                         "audio": True,
@@ -1561,7 +1590,7 @@ def main():
                     webrtc_ctx = webrtc_streamer(
                         key="audio-classification-minimal",
                         mode=WebRtcMode.SENDONLY,
-                        audio_processor_factory=lambda: st.session_state.audio_processor,
+                        audio_processor_factory=safe_audio_processor_factory,
                         media_stream_constraints={"audio": True, "video": False},
                     )
                     webrtc_initialized = True
@@ -1579,7 +1608,7 @@ def main():
                         webrtc_ctx = webrtc_streamer(
                             key="audio-classification-basic",
                             mode=WebRtcMode.SENDONLY,
-                            audio_processor_factory=lambda: st.session_state.audio_processor,
+                            audio_processor_factory=safe_audio_processor_factory,
                         )
                         webrtc_initialized = True
                         debug_log("✅ Bare-bones WebRTC initialization successful")
