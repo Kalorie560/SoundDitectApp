@@ -419,15 +419,21 @@ def extract_cnn_architecture(state_dict, arch_type):
     return channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes
 
 def extract_attention_params(state_dict):
-    """Extract attention parameters from state dict"""
+    """Extract attention parameters from state dict (DEPRECATED)
+    
+    WARNING: This function extracts the output dimensions from saved attention weights,
+    NOT the input dimensions needed for creating new attention layers.
+    This function is kept for compatibility but should NOT be used for creating new attention layers.
+    Always use model.fc_input_size for attention input dimensions instead.
+    """
     if 'attention.query.weight' in state_dict:
-        # Note: This returns the output dim of query layer, not necessarily the input dim
-        # The actual input dim should be calculated from CNN output
-        hidden_dim = state_dict['attention.query.weight'].shape[0]
+        # Note: This returns the output dim of query layer, not the input dim needed for creation
+        # DO NOT USE THIS FOR input_dim when creating MultiHeadAttention
+        hidden_dim = state_dict['attention.query.weight'].shape[0]  # This is OUTPUT dimension
         # Try to infer number of heads from attention patterns
         num_heads = 8  # Default based on training config
         return hidden_dim, num_heads
-    return 256, 8  # defaults
+    return 256, 8  # defaults (OUTPUT dimensions, not input)
 
 def create_adaptive_cnn(input_length, channels, kernel_sizes, strides, classifier_input_size=None, fc_sizes=None):
     """Create adaptive CNN with individual layers based on training config"""
@@ -566,16 +572,17 @@ def load_model(model_path: str) -> nn.Module:
                 debug_log("Step 5: Adding attention mechanism")
                 st.info("Attention mechanism detected")
                 
-                # Calculate the correct attention input size from the model's flattened CNN output
-                debug_log("Calculating correct attention input size from CNN output")
-                attention_input_size = model.fc_input_size  # This is the flattened CNN output size
-                debug_log(f"Calculated attention input size: {attention_input_size}")
-                st.info(f"Calculated attention input size: {attention_input_size}")
+                # CRITICAL FIX: Always use model's actual fc_input_size for attention input
+                # Ignore any extracted attention_hidden_dim from state dict as it's the output dim, not input dim
+                debug_log("Using model's actual fc_input_size for attention input dimensions")
+                attention_input_size = model.fc_input_size  # This is the actual flattened CNN output size
+                debug_log(f"Attention input size (from model.fc_input_size): {attention_input_size}")
+                st.info(f"Attention input size: {attention_input_size}")
                 
                 attention, attention_error = safe_execute(
                     MultiHeadAttention,
-                    "Creating MultiHeadAttention with correct input size",
-                    input_dim=attention_input_size, num_heads=attention_num_heads or 8
+                    "Creating MultiHeadAttention with model's fc_input_size",
+                    input_dim=attention_input_size, num_heads=8  # Always use 8 heads
                 )
                 if attention_error:
                     debug_log(f"Failed to create attention: {attention_error}", "warning")
@@ -716,14 +723,14 @@ def load_model(model_path: str) -> nn.Module:
                 
                 if has_attention:
                     debug_log("Adding attention to fallback model")
-                    # Use the fallback model's fc_input_size for correct attention dimensions
+                    # CRITICAL FIX: Use the fallback model's actual fc_input_size for attention dimensions
                     fallback_attention_input_size = fallback_model.fc_input_size
-                    debug_log(f"Fallback attention input size: {fallback_attention_input_size}")
+                    debug_log(f"Fallback attention input size (from fallback_model.fc_input_size): {fallback_attention_input_size}")
                     st.info(f"Fallback attention input size: {fallback_attention_input_size}")
                     
                     fallback_attention, fallback_attention_error = safe_execute(
                         MultiHeadAttention,
-                        "Creating fallback attention with correct size",
+                        "Creating fallback attention with fallback model's fc_input_size",
                         input_dim=fallback_attention_input_size, num_heads=8
                     )
                     if fallback_attention_error is None:
