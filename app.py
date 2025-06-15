@@ -50,6 +50,7 @@ import traceback
 import psutil
 import gc
 import logging
+import platform
 
 # Debug logging setup
 def setup_debug_logging():
@@ -1472,9 +1473,13 @@ def main():
                     debug_log(f"⚠️ AudioProcessor functionality test failed: {processor_test_error}", "warning")
                     st.warning(f"AudioProcessor機能テストに失敗しましたが、継続します: {processor_test_error}")
         
-        # Step 2: Initialize WebRTC streamer with enhanced debugging
+        # Step 2: Initialize WebRTC streamer with comprehensive safety measures
         debug_log("Step 2: Initializing WebRTC streamer (CRITICAL SECTION)")
         log_memory_usage("Before WebRTC Initialization")
+        
+        # Initialize webrtc_ctx variable
+        webrtc_ctx = None
+        webrtc_initialized = False
         
         try:
             # Pre-WebRTC validation
@@ -1486,6 +1491,31 @@ def main():
             
             debug_log("✅ AudioProcessor state validation passed for WebRTC")
             
+            # Environment compatibility check
+            debug_log("Checking WebRTC environment compatibility")
+            try:
+                import platform
+                import streamlit as st_check
+                
+                system_info = {
+                    "platform": platform.system(),
+                    "python_version": platform.python_version(),
+                    "streamlit_version": st_check.__version__ if hasattr(st_check, '__version__') else "unknown"
+                }
+                debug_log(f"Environment: {system_info}")
+                
+                # Check for known problematic configurations
+                is_linux = platform.system() == "Linux"
+                is_docker = os.path.exists("/.dockerenv")
+                is_ci = any(ci_var in os.environ for ci_var in ["CI", "GITHUB_ACTIONS", "TRAVIS"])
+                
+                if is_linux or is_docker or is_ci:
+                    debug_log("⚠️ Detected potentially problematic WebRTC environment (Linux/Docker/CI)", "warning")
+                    st.warning("⚠️ WebRTC環境での互換性問題が検出されました。安全モードで初期化を試行します。")
+                
+            except Exception as env_check_error:
+                debug_log(f"Environment check failed: {env_check_error}", "warning")
+                
             # Test AudioProcessor factory function before WebRTC
             debug_log("Testing AudioProcessor factory function")
             try:
@@ -1499,10 +1529,13 @@ def main():
                 st.error(f"AudioProcessor factory test failed: {factory_error}")
                 return
             
-            # Attempt WebRTC initialization with comprehensive error handling
-            debug_log("Attempting WebRTC streamer initialization")
-            webrtc_result, webrtc_error = safe_execute(
-                lambda: webrtc_streamer(
+            # ENHANCED: Multiple WebRTC initialization strategies with progressive fallbacks
+            debug_log("Strategy 1: Attempting full-featured WebRTC initialization")
+            
+            # Strategy 1: Full-featured WebRTC with all options
+            try:
+                debug_log("Attempting full WebRTC configuration")
+                webrtc_ctx = webrtc_streamer(
                     key="audio-classification",
                     mode=WebRtcMode.SENDONLY,
                     audio_processor_factory=lambda: st.session_state.audio_processor,
@@ -1512,22 +1545,135 @@ def main():
                         "video": False,
                     },
                     async_processing=True,
-                ),
-                "WebRTC streamer initialization"
-            )
+                )
+                webrtc_initialized = True
+                debug_log("✅ Full WebRTC initialization successful")
+                st.success("✅ WebRTC streaming ready (Full Configuration)")
+                
+            except Exception as full_webrtc_error:
+                debug_log(f"Strategy 1 failed: {full_webrtc_error}", "warning")
+                st.warning(f"フル機能WebRTC初期化に失敗: {str(full_webrtc_error)[:100]}...")
+                
+                # Strategy 2: Minimal WebRTC configuration
+                debug_log("Strategy 2: Attempting minimal WebRTC configuration")
+                try:
+                    debug_log("Attempting minimal WebRTC configuration")
+                    webrtc_ctx = webrtc_streamer(
+                        key="audio-classification-minimal",
+                        mode=WebRtcMode.SENDONLY,
+                        audio_processor_factory=lambda: st.session_state.audio_processor,
+                        media_stream_constraints={"audio": True, "video": False},
+                    )
+                    webrtc_initialized = True
+                    debug_log("✅ Minimal WebRTC initialization successful")
+                    st.success("✅ WebRTC streaming ready (Minimal Configuration)")
+                    
+                except Exception as minimal_webrtc_error:
+                    debug_log(f"Strategy 2 failed: {minimal_webrtc_error}", "warning")
+                    st.warning(f"最小WebRTC初期化に失敗: {str(minimal_webrtc_error)[:100]}...")
+                    
+                    # Strategy 3: Bare-bones WebRTC
+                    debug_log("Strategy 3: Attempting bare-bones WebRTC configuration")
+                    try:
+                        debug_log("Attempting bare-bones WebRTC configuration")
+                        webrtc_ctx = webrtc_streamer(
+                            key="audio-classification-basic",
+                            mode=WebRtcMode.SENDONLY,
+                            audio_processor_factory=lambda: st.session_state.audio_processor,
+                        )
+                        webrtc_initialized = True
+                        debug_log("✅ Bare-bones WebRTC initialization successful")
+                        st.success("✅ WebRTC streaming ready (Basic Configuration)")
+                        
+                    except Exception as basic_webrtc_error:
+                        debug_log(f"Strategy 3 failed: {basic_webrtc_error}", "error")
+                        st.error(f"基本WebRTC初期化に失敗: {str(basic_webrtc_error)[:100]}...")
+                        webrtc_initialized = False
             
-            if webrtc_error:
-                debug_log(f"❌ WebRTC initialization failed: {webrtc_error}", "error")
-                st.error(f"WebRTC初期化に失敗しました: {webrtc_error}")
+            if not webrtc_initialized:
+                debug_log("❌ All WebRTC initialization strategies failed", "error")
+                st.error("❌ すべてのWebRTC初期化戦略が失敗しました")
                 
-                # Show detailed error information
+                # Provide detailed error information in debug mode
                 if debug_mode:
-                    with st.expander("🔍 WebRTC Error Details"):
-                        st.text(traceback.format_exc())
+                    with st.expander("🔍 WebRTC Initialization Error Details"):
+                        st.text("All WebRTC initialization strategies failed:")
+                        st.text("1. Full configuration failed")
+                        st.text("2. Minimal configuration failed") 
+                        st.text("3. Bare-bones configuration failed")
+                        st.text("\nThis may be due to environment compatibility issues.")
                 
-                # Provide recovery options
-                st.warning("⚠️ WebRTC初期化に失敗しました。以下のオプションをお試しください:")
-                col1, col2 = st.columns(2)
+                # Alternative solution: File upload method
+                st.warning("⚠️ WebRTC録音が利用できません。代替方法を提供します:")
+                
+                # FALLBACK: File upload recording method
+                st.subheader("📁 ファイルアップロード録音")
+                st.info("WebRTCが利用できない場合は、音声ファイルをアップロードして分析できます。")
+                
+                uploaded_audio = st.file_uploader(
+                    "音声ファイルをアップロード", 
+                    type=['wav', 'mp3', 'flac', 'ogg'],
+                    help="対応形式: WAV, MP3, FLAC, OGG"
+                )
+                
+                if uploaded_audio is not None:
+                    debug_log("Processing uploaded audio file")
+                    try:
+                        # Process uploaded audio file
+                        try:
+                            import librosa
+                        except ImportError:
+                            st.error("❌ librosaライブラリが必要です。`pip install librosa`でインストールしてください。")
+                            st.info("インストール方法: `pip install librosa`")
+                            return
+                        
+                        with st.spinner("音声ファイルを処理中..."):
+                            # Load audio file
+                            audio_data, sr = librosa.load(uploaded_audio, sr=22050, mono=True)
+                            debug_log(f"Loaded audio: duration={len(audio_data)/sr:.2f}s, sr={sr}")
+                            
+                            # Split into 1-second chunks
+                            chunk_size = sr  # 1 second worth of samples
+                            audio_chunks = []
+                            predictions = []
+                            
+                            for i in range(0, len(audio_data), chunk_size):
+                                chunk = audio_data[i:i+chunk_size]
+                                if len(chunk) < chunk_size:
+                                    # Pad the last chunk if it's too short
+                                    chunk = np.pad(chunk, (0, chunk_size - len(chunk)), mode='constant')
+                                
+                                # Process chunk
+                                try:
+                                    audio_tensor = preprocess_audio(chunk, target_sr=22050, target_length=44100)
+                                    with torch.no_grad():
+                                        output = st.session_state.model(audio_tensor)
+                                        prediction = torch.argmax(output, dim=1).item()
+                                        predictions.append(prediction)
+                                        audio_chunks.append(chunk)
+                                        
+                                except Exception as chunk_error:
+                                    debug_log(f"Chunk processing error: {chunk_error}", "warning")
+                                    predictions.append(0)  # Default to OK
+                                    audio_chunks.append(chunk)
+                            
+                            # Store results
+                            st.session_state.results = (predictions, audio_chunks)
+                            st.session_state.recording_complete = True
+                            st.success(f"✅ ファイル処理完了！{len(predictions)}秒の音声を分析しました。")
+                            
+                            debug_log(f"File processing complete: {len(predictions)} segments processed")
+                        
+                    except Exception as file_error:
+                        debug_log(f"File processing error: {file_error}", "error")
+                        st.error(f"ファイル処理エラー: {file_error}")
+                        if debug_mode:
+                            with st.expander("🔍 File Processing Error Details"):
+                                st.text(traceback.format_exc())
+                
+                # Recovery options
+                st.subheader("🔧 トラブルシューティング")
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     if st.button("🔄 AudioProcessor再作成"):
                         st.session_state.audio_processor = None
@@ -1537,12 +1683,14 @@ def main():
                         st.session_state.model = None
                         st.session_state.audio_processor = None
                         st.rerun()
-                return
+                with col3:
+                    if st.button("🔄 再試行"):
+                        st.rerun()
+                        
+                # Don't return here - continue to show results if available
+                webrtc_ctx = None
             else:
-                webrtc_ctx = webrtc_result
-                debug_log("✅ WebRTC streamer initialized successfully")
                 log_memory_usage("After WebRTC Initialization")
-                st.success("✅ WebRTC streaming ready")
         
         except Exception as e:
             error_msg = f"Unexpected error in WebRTC initialization: {e}"
@@ -1556,8 +1704,73 @@ def main():
                 with st.expander("🔍 WebRTC Error Details"):
                     st.text(full_traceback)
             
+            # Provide alternative recording method
+            st.warning("⚠️ WebRTC初期化中に予期しないエラーが発生しました。ファイルアップロード方式をお試しください。")
+            
+            # File upload fallback (same as above)
+            st.subheader("📁 ファイルアップロード録音 (代替方式)")
+            uploaded_audio = st.file_uploader(
+                "音声ファイルをアップロード", 
+                type=['wav', 'mp3', 'flac', 'ogg'],
+                help="対応形式: WAV, MP3, FLAC, OGG",
+                key="fallback_upload"
+            )
+            
+            if uploaded_audio is not None:
+                debug_log("Processing uploaded audio file (fallback)")
+                try:
+                    # Process uploaded audio file
+                    try:
+                        import librosa
+                    except ImportError:
+                        st.error("❌ librosaライブラリが必要です。`pip install librosa`でインストールしてください。")
+                        st.info("インストール方法: `pip install librosa`")
+                    else:
+                        with st.spinner("音声ファイルを処理中..."):
+                            # Load audio file
+                            audio_data, sr = librosa.load(uploaded_audio, sr=22050, mono=True)
+                            debug_log(f"Loaded audio (fallback): duration={len(audio_data)/sr:.2f}s, sr={sr}")
+                            
+                            # Split into 1-second chunks
+                            chunk_size = sr  # 1 second worth of samples
+                            audio_chunks = []
+                            predictions = []
+                            
+                            for i in range(0, len(audio_data), chunk_size):
+                                chunk = audio_data[i:i+chunk_size]
+                                if len(chunk) < chunk_size:
+                                    # Pad the last chunk if it's too short
+                                    chunk = np.pad(chunk, (0, chunk_size - len(chunk)), mode='constant')
+                                
+                                # Process chunk
+                                try:
+                                    audio_tensor = preprocess_audio(chunk, target_sr=22050, target_length=44100)
+                                    with torch.no_grad():
+                                        output = st.session_state.model(audio_tensor)
+                                        prediction = torch.argmax(output, dim=1).item()
+                                        predictions.append(prediction)
+                                        audio_chunks.append(chunk)
+                                        
+                                except Exception as chunk_error:
+                                    debug_log(f"Chunk processing error (fallback): {chunk_error}", "warning")
+                                    predictions.append(0)  # Default to OK
+                                    audio_chunks.append(chunk)
+                            
+                            # Store results
+                            st.session_state.results = (predictions, audio_chunks)
+                            st.session_state.recording_complete = True
+                            st.success(f"✅ ファイル処理完了！{len(predictions)}秒の音声を分析しました。")
+                            
+                            debug_log(f"File processing complete (fallback): {len(predictions)} segments processed")
+                        
+                except Exception as file_error:
+                    debug_log(f"File processing error (fallback): {file_error}", "error")
+                    st.error(f"ファイル処理エラー: {file_error}")
+                    if debug_mode:
+                        with st.expander("🔍 File Processing Error Details (Fallback)"):
+                            st.text(traceback.format_exc())
+            
             # Recovery options
-            st.warning("⚠️ WebRTC初期化中に予期しないエラーが発生しました:")
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔄 AudioProcessor再作成", key="unexpected_error_processor_reset"):
@@ -1568,22 +1781,28 @@ def main():
                     st.session_state.model = None
                     st.session_state.audio_processor = None
                     st.rerun()
-            return
+                    
+            webrtc_ctx = None
         
-        # Recording status
-        if webrtc_ctx.state.playing:
-            st.info("🔴 録音中... マイクに向かって話してください！")
-            st.session_state.recording_complete = False
-        elif webrtc_ctx.state.signalling:
-            st.info("📡 接続中...")
-        else:
-            if not st.session_state.recording_complete and st.session_state.audio_processor is not None:
-                # Recording just stopped, get results
-                predictions, audio_chunks = st.session_state.audio_processor.get_results()
-                if predictions:
-                    st.session_state.results = (predictions, audio_chunks)
-                    st.session_state.recording_complete = True
-                    st.success(f"✅ 録音完了！{len(predictions)}秒の音声を処理しました。")
+        # Recording status (only if WebRTC is properly initialized)
+        if webrtc_ctx is not None and hasattr(webrtc_ctx, 'state'):
+            try:
+                if webrtc_ctx.state.playing:
+                    st.info("🔴 録音中... マイクに向かって話してください！")
+                    st.session_state.recording_complete = False
+                elif webrtc_ctx.state.signalling:
+                    st.info("📡 接続中...")
+                else:
+                    if not st.session_state.recording_complete and st.session_state.audio_processor is not None:
+                        # Recording just stopped, get results
+                        predictions, audio_chunks = st.session_state.audio_processor.get_results()
+                        if predictions:
+                            st.session_state.results = (predictions, audio_chunks)
+                            st.session_state.recording_complete = True
+                            st.success(f"✅ 録音完了！{len(predictions)}秒の音声を処理しました。")
+            except Exception as status_error:
+                debug_log(f"WebRTC status check error: {status_error}", "warning")
+                st.warning("WebRTC接続状態の確認中にエラーが発生しました")
         
         # Results section
         if st.session_state.results is not None:
