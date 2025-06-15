@@ -1079,13 +1079,71 @@ def adapt_state_dict_keys(state_dict):
 # Audio processor class for WebRTC
 class AudioProcessor(AudioProcessorBase):
     def __init__(self, model: nn.Module, target_sr: int = 22050, chunk_length: int = 44100):
-        self.model = model
-        self.target_sr = target_sr
-        self.chunk_length = chunk_length  # Training config: 44100 samples for 1 second at 44.1kHz
-        self.audio_buffer = []
-        self.chunk_results = []
-        self.chunk_audio_data = []
-        self.buffer_lock = threading.Lock()
+        """Initialize AudioProcessor with comprehensive debugging and validation"""
+        debug_log("🎯 ENTERING AudioProcessor.__init__")
+        log_memory_usage("AudioProcessor Init Start")
+        
+        try:
+            # Step 1: Validate model input
+            debug_log("Step 1: Validating model input")
+            if model is None:
+                raise ValueError("Model cannot be None")
+            
+            if not isinstance(model, nn.Module):
+                raise TypeError(f"Model must be nn.Module, got {type(model)}")
+            
+            debug_log(f"✅ Model validation passed: {type(model).__name__}")
+            
+            # Step 2: Test model compatibility
+            debug_log("Step 2: Testing model compatibility with dummy input")
+            try:
+                with torch.no_grad():
+                    test_input = torch.randn(1, 1, chunk_length)
+                    debug_tensor_shape("test_input", test_input, "AudioProcessor compatibility test")
+                    
+                    test_output = model(test_input)
+                    debug_tensor_shape("test_output", test_output, "AudioProcessor compatibility test result")
+                    
+                    debug_log(f"✅ Model compatibility test passed: output shape {test_output.shape}")
+                    
+                    # Clean up test tensors
+                    del test_input, test_output
+                    
+            except Exception as model_test_error:
+                debug_log(f"❌ Model compatibility test failed: {model_test_error}", "error")
+                raise RuntimeError(f"Model failed compatibility test: {model_test_error}")
+            
+            # Step 3: Initialize basic attributes
+            debug_log("Step 3: Initializing basic attributes")
+            self.model = model
+            self.target_sr = target_sr
+            self.chunk_length = chunk_length
+            
+            debug_log(f"Configured parameters: target_sr={target_sr}, chunk_length={chunk_length}")
+            
+            # Step 4: Initialize data structures
+            debug_log("Step 4: Initializing data structures")
+            self.audio_buffer = []
+            self.chunk_results = []
+            self.chunk_audio_data = []
+            
+            # Step 5: Initialize threading lock
+            debug_log("Step 5: Initializing threading lock")
+            self.buffer_lock = threading.Lock()
+            
+            debug_log("✅ AudioProcessor initialization completed successfully")
+            log_memory_usage("AudioProcessor Init Complete")
+            
+        except Exception as init_error:
+            error_msg = f"❌ AudioProcessor initialization failed: {init_error}"
+            debug_log(error_msg, "error")
+            
+            # Clean up any partially initialized state
+            if hasattr(self, 'model'):
+                delattr(self, 'model')
+            
+            log_memory_usage("AudioProcessor Init Failed")
+            raise RuntimeError(f"AudioProcessor initialization failed: {init_error}")
         
     def recv_audio(self, frame: av.AudioFrame) -> av.AudioFrame:
         # Convert frame to numpy array
@@ -1314,29 +1372,135 @@ def main():
         debug_log("🎙️ Model loaded successfully, initializing audio recording section")
         st.header("🎙️ 音声録音")
         
-        # Step 1: Create audio processor with debugging
+        # Pre-step: Validate model state before AudioProcessor creation
+        debug_log("Pre-step: Comprehensive model state validation")
+        log_memory_usage("Before Model State Validation")
+        
+        try:
+            # Check if model is still valid
+            if st.session_state.model is None:
+                debug_log("❌ Model in session state is None", "error")
+                st.error("モデルの状態が無効です。モデルを再読み込みしてください。")
+                return
+            
+            # Check model type
+            if not isinstance(st.session_state.model, nn.Module):
+                debug_log(f"❌ Model is not nn.Module: {type(st.session_state.model)}", "error")
+                st.error("モデルのタイプが無効です。")
+                return
+            
+            debug_log(f"✅ Model type validation passed: {type(st.session_state.model).__name__}")
+            
+            # Test model with dummy input to ensure it's still functional
+            debug_log("Testing model functionality before AudioProcessor creation")
+            try:
+                with torch.no_grad():
+                    test_input = torch.randn(1, 1, 44100)
+                    debug_tensor_shape("pre_processor_test_input", test_input)
+                    
+                    test_output = st.session_state.model(test_input)
+                    debug_tensor_shape("pre_processor_test_output", test_output)
+                    
+                    debug_log(f"✅ Pre-AudioProcessor model test successful: {test_output.shape}")
+                    
+                    # Clean up
+                    del test_input, test_output
+                    gc.collect()
+                    
+            except Exception as model_test_error:
+                debug_log(f"❌ Pre-AudioProcessor model test failed: {model_test_error}", "error")
+                st.error(f"モデルの機能テストに失敗しました: {model_test_error}")
+                with st.expander("🔍 Model Test Error Details"):
+                    st.text(traceback.format_exc())
+                return
+            
+            log_memory_usage("After Model State Validation")
+            
+        except Exception as validation_error:
+            debug_log(f"❌ Model state validation failed: {validation_error}", "error")
+            st.error(f"モデル状態検証エラー: {validation_error}")
+            if debug_mode:
+                with st.expander("🔍 Validation Error Details"):
+                    st.text(traceback.format_exc())
+            return
+        
+        # Step 1: Create audio processor with enhanced debugging
         if st.session_state.audio_processor is None:
-            debug_log("Step 1: Creating AudioProcessor instance")
+            debug_log("Step 1: Creating AudioProcessor instance with validated model")
+            
+            # Additional safety: Force garbage collection before AudioProcessor creation
+            debug_log("Performing garbage collection before AudioProcessor creation")
+            gc.collect()
+            log_memory_usage("Before AudioProcessor Creation")
             
             processor_result, processor_error = safe_execute(
                 AudioProcessor,
-                "Creating AudioProcessor with loaded model",
-                st.session_state.model, chunk_length=44100
+                "Creating AudioProcessor with validated model",
+                st.session_state.model, target_sr=22050, chunk_length=44100
             )
             
             if processor_error:
-                debug_log(f"Failed to create AudioProcessor: {processor_error}", "error")
-                st.error(f"Failed to create audio processor: {processor_error}")
+                debug_log(f"❌ Failed to create AudioProcessor: {processor_error}", "error")
+                st.error(f"オーディオプロセッサの作成に失敗しました: {processor_error}")
+                
+                # Show detailed error information
+                if debug_mode:
+                    with st.expander("🔍 AudioProcessor Creation Error Details"):
+                        st.text(traceback.format_exc())
+                
+                # Attempt recovery by resetting model state
+                debug_log("Attempting recovery by clearing model state", "warning")
+                st.warning("⚠️ AudioProcessor作成に失敗しました。モデルを再読み込みしてください。")
+                if st.button("🔄 モデル状態をリセット"):
+                    st.session_state.model = None
+                    st.session_state.audio_processor = None
+                    st.rerun()
                 return
             else:
                 st.session_state.audio_processor = processor_result
                 debug_log("✅ AudioProcessor created successfully")
+                log_memory_usage("After AudioProcessor Creation")
+                st.success("✅ オーディオプロセッサが正常に作成されました")
+                
+                # Additional validation: Test AudioProcessor functionality
+                debug_log("Testing AudioProcessor functionality")
+                try:
+                    # Test that AudioProcessor can handle basic operations
+                    test_predictions, test_audio_chunks = st.session_state.audio_processor.get_results()
+                    debug_log(f"✅ AudioProcessor functionality test passed: {len(test_predictions)} predictions, {len(test_audio_chunks)} chunks")
+                except Exception as processor_test_error:
+                    debug_log(f"⚠️ AudioProcessor functionality test failed: {processor_test_error}", "warning")
+                    st.warning(f"AudioProcessor機能テストに失敗しましたが、継続します: {processor_test_error}")
         
-        # Step 2: Initialize WebRTC streamer with debugging
+        # Step 2: Initialize WebRTC streamer with enhanced debugging
         debug_log("Step 2: Initializing WebRTC streamer (CRITICAL SECTION)")
         log_memory_usage("Before WebRTC Initialization")
         
         try:
+            # Pre-WebRTC validation
+            debug_log("Pre-WebRTC validation: Checking AudioProcessor state")
+            if st.session_state.audio_processor is None:
+                debug_log("❌ AudioProcessor is None during WebRTC initialization", "error")
+                st.error("AudioProcessor状態が無効です。")
+                return
+            
+            debug_log("✅ AudioProcessor state validation passed for WebRTC")
+            
+            # Test AudioProcessor factory function before WebRTC
+            debug_log("Testing AudioProcessor factory function")
+            try:
+                test_processor = lambda: st.session_state.audio_processor
+                test_result = test_processor()
+                if test_result is None:
+                    raise ValueError("AudioProcessor factory returned None")
+                debug_log("✅ AudioProcessor factory test passed")
+            except Exception as factory_error:
+                debug_log(f"❌ AudioProcessor factory test failed: {factory_error}", "error")
+                st.error(f"AudioProcessor factory test failed: {factory_error}")
+                return
+            
+            # Attempt WebRTC initialization with comprehensive error handling
+            debug_log("Attempting WebRTC streamer initialization")
             webrtc_result, webrtc_error = safe_execute(
                 lambda: webrtc_streamer(
                     key="audio-classification",
@@ -1354,12 +1518,31 @@ def main():
             
             if webrtc_error:
                 debug_log(f"❌ WebRTC initialization failed: {webrtc_error}", "error")
-                st.error(f"WebRTC initialization failed: {webrtc_error}")
+                st.error(f"WebRTC初期化に失敗しました: {webrtc_error}")
+                
+                # Show detailed error information
+                if debug_mode:
+                    with st.expander("🔍 WebRTC Error Details"):
+                        st.text(traceback.format_exc())
+                
+                # Provide recovery options
+                st.warning("⚠️ WebRTC初期化に失敗しました。以下のオプションをお試しください:")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("🔄 AudioProcessor再作成"):
+                        st.session_state.audio_processor = None
+                        st.rerun()
+                with col2:
+                    if st.button("🔄 完全リセット"):
+                        st.session_state.model = None
+                        st.session_state.audio_processor = None
+                        st.rerun()
                 return
             else:
                 webrtc_ctx = webrtc_result
                 debug_log("✅ WebRTC streamer initialized successfully")
                 log_memory_usage("After WebRTC Initialization")
+                st.success("✅ WebRTC streaming ready")
         
         except Exception as e:
             error_msg = f"Unexpected error in WebRTC initialization: {e}"
@@ -1368,10 +1551,23 @@ def main():
             full_traceback = traceback.format_exc()
             debug_logger.error(f"Unexpected WebRTC error:\n{full_traceback}")
             
-            st.error(f"WebRTC initialization error: {e}")
+            st.error(f"WebRTC初期化エラー: {e}")
             if debug_mode:
                 with st.expander("🔍 WebRTC Error Details"):
                     st.text(full_traceback)
+            
+            # Recovery options
+            st.warning("⚠️ WebRTC初期化中に予期しないエラーが発生しました:")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 AudioProcessor再作成", key="unexpected_error_processor_reset"):
+                    st.session_state.audio_processor = None
+                    st.rerun()
+            with col2:
+                if st.button("🔄 完全リセット", key="unexpected_error_full_reset"):
+                    st.session_state.model = None
+                    st.session_state.audio_processor = None
+                    st.rerun()
             return
         
         # Recording status
