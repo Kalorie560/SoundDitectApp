@@ -1496,6 +1496,31 @@ def main():
         debug_log("Step 2: Initializing WebRTC streamer (CRITICAL SECTION)")
         log_memory_usage("Before WebRTC Initialization")
         
+        # Define safe audio processor factory function with enhanced validation
+        def safe_audio_processor_factory():
+            debug_log("Factory: Called safe_audio_processor_factory")
+            try:
+                # Enhanced validation with multiple checks
+                if not hasattr(st.session_state, 'audio_processor'):
+                    debug_log("Factory: session_state has no audio_processor attribute", "error")
+                    raise RuntimeError("audio_processor attribute missing from session_state")
+                
+                if st.session_state.audio_processor is None:
+                    debug_log("Factory: audio_processor is None in session_state", "error")  
+                    raise RuntimeError("audio_processor not initialized in session_state")
+                
+                # Additional validation: Check if it has the required method
+                if not hasattr(st.session_state.audio_processor, 'recv_audio'):
+                    debug_log("Factory: audio_processor missing recv_audio method", "error")
+                    raise RuntimeError("audio_processor missing required recv_audio method")
+                
+                debug_log("Factory: Returning valid audio_processor")
+                return st.session_state.audio_processor
+                
+            except Exception as factory_error:
+                debug_log(f"Factory: Exception occurred: {factory_error}", "error")
+                raise RuntimeError(f"audio_processor factory error: {factory_error}")
+        
         # Initialize webrtc_ctx variable
         webrtc_ctx = None
         webrtc_initialized = False
@@ -1554,15 +1579,6 @@ def main():
             # Strategy 1: Full-featured WebRTC with all options
             try:
                 debug_log("Attempting full WebRTC configuration")
-                
-                # Create safe factory function with proper error handling
-                def safe_audio_processor_factory():
-                    if hasattr(st.session_state, 'audio_processor') and st.session_state.audio_processor is not None:
-                        debug_log("Factory: Returning existing audio_processor")
-                        return st.session_state.audio_processor
-                    else:
-                        debug_log("Factory: audio_processor not available in session_state", "error")
-                        raise RuntimeError("audio_processor not initialized in session_state")
                 
                 webrtc_ctx = webrtc_streamer(
                     key="audio-classification",
