@@ -1496,30 +1496,78 @@ def main():
         debug_log("Step 2: Initializing WebRTC streamer (CRITICAL SECTION)")
         log_memory_usage("Before WebRTC Initialization")
         
-        # Define safe audio processor factory function with enhanced validation
+        # Define enhanced safe audio processor factory function with comprehensive validation
         def safe_audio_processor_factory():
-            debug_log("Factory: Called safe_audio_processor_factory")
+            debug_log("Factory: Called safe_audio_processor_factory (Enhanced)")
             try:
-                # Enhanced validation with multiple checks
+                # Step 1: Check session_state attribute existence
                 if not hasattr(st.session_state, 'audio_processor'):
                     debug_log("Factory: session_state has no audio_processor attribute", "error")
-                    raise RuntimeError("audio_processor attribute missing from session_state")
+                    debug_log("Factory: Attempting to reinitialize session_state", "warning")
+                    
+                    # Try to reinitialize session state
+                    if 'audio_processor' not in st.session_state:
+                        st.session_state.audio_processor = None
+                    
+                    if st.session_state.audio_processor is None:
+                        raise RuntimeError("audio_processor attribute missing and cannot be reinitialized")
                 
+                # Step 2: Check if audio_processor is None
                 if st.session_state.audio_processor is None:
-                    debug_log("Factory: audio_processor is None in session_state", "error")  
-                    raise RuntimeError("audio_processor not initialized in session_state")
+                    debug_log("Factory: audio_processor is None in session_state", "error")
+                    debug_log("Factory: Attempting AudioProcessor recovery", "warning")
+                    
+                    # Try to recover by recreating AudioProcessor if model is available
+                    if hasattr(st.session_state, 'model') and st.session_state.model is not None:
+                        debug_log("Factory: Model available, attempting AudioProcessor recreation")
+                        try:
+                            # Create new AudioProcessor instance
+                            temp_processor = AudioProcessor(
+                                st.session_state.model, 
+                                target_sr=22050, 
+                                chunk_length=44100
+                            )
+                            st.session_state.audio_processor = temp_processor
+                            debug_log("Factory: AudioProcessor recreation successful")
+                        except Exception as recreation_error:
+                            debug_log(f"Factory: AudioProcessor recreation failed: {recreation_error}", "error")
+                            raise RuntimeError(f"audio_processor recreation failed: {recreation_error}")
+                    else:
+                        raise RuntimeError("audio_processor not initialized and model unavailable for recreation")
                 
-                # Additional validation: Check if it has the required method
+                # Step 3: Validate AudioProcessor type and methods
+                if not isinstance(st.session_state.audio_processor, AudioProcessor):
+                    debug_log(f"Factory: audio_processor has wrong type: {type(st.session_state.audio_processor)}", "error")
+                    raise RuntimeError(f"audio_processor has wrong type, expected AudioProcessor, got {type(st.session_state.audio_processor)}")
+                
+                # Step 4: Check if it has the required recv_audio method
                 if not hasattr(st.session_state.audio_processor, 'recv_audio'):
                     debug_log("Factory: audio_processor missing recv_audio method", "error")
                     raise RuntimeError("audio_processor missing required recv_audio method")
                 
-                debug_log("Factory: Returning valid audio_processor")
+                # Step 5: Validate recv_audio method is callable
+                if not callable(getattr(st.session_state.audio_processor, 'recv_audio')):
+                    debug_log("Factory: recv_audio method is not callable", "error")
+                    raise RuntimeError("recv_audio method exists but is not callable")
+                
+                # Step 6: Validate AudioProcessor internal state
+                required_attrs = ['model', 'target_sr', 'chunk_length', 'audio_buffer', 'buffer_lock']
+                for attr in required_attrs:
+                    if not hasattr(st.session_state.audio_processor, attr):
+                        debug_log(f"Factory: audio_processor missing required attribute: {attr}", "error")
+                        raise RuntimeError(f"audio_processor missing required attribute: {attr}")
+                
+                debug_log("Factory: All validation checks passed, returning valid audio_processor")
                 return st.session_state.audio_processor
                 
             except Exception as factory_error:
                 debug_log(f"Factory: Exception occurred: {factory_error}", "error")
-                raise RuntimeError(f"audio_processor factory error: {factory_error}")
+                # Provide detailed debugging information
+                debug_log(f"Factory: Session state keys: {list(st.session_state.keys())}")
+                if hasattr(st.session_state, 'audio_processor'):
+                    debug_log(f"Factory: audio_processor type: {type(st.session_state.audio_processor)}")
+                    debug_log(f"Factory: audio_processor is None: {st.session_state.audio_processor is None}")
+                raise RuntimeError(f"Enhanced audio_processor factory error: {factory_error}")
         
         # Initialize webrtc_ctx variable
         webrtc_ctx = None
@@ -1560,93 +1608,214 @@ def main():
             except Exception as env_check_error:
                 debug_log(f"Environment check failed: {env_check_error}", "warning")
                 
-            # Test AudioProcessor factory function before WebRTC
-            debug_log("Testing AudioProcessor factory function")
+            # Enhanced AudioProcessor factory function testing
+            debug_log("Testing enhanced AudioProcessor factory function")
             try:
-                test_processor = lambda: st.session_state.audio_processor
-                test_result = test_processor()
-                if test_result is None:
-                    raise ValueError("AudioProcessor factory returned None")
-                debug_log("✅ AudioProcessor factory test passed")
+                # Test the actual factory function that will be used
+                factory_test_result = safe_audio_processor_factory()
+                if factory_test_result is None:
+                    raise ValueError("Enhanced AudioProcessor factory returned None")
+                debug_log("✅ Enhanced AudioProcessor factory test passed")
+                
+                # Additional factory stress test - call it multiple times
+                for i in range(3):
+                    factory_test_result = safe_audio_processor_factory()
+                    if factory_test_result is None:
+                        raise ValueError(f"Factory stress test failed on iteration {i+1}")
+                debug_log("✅ Factory stress test passed (3 iterations)")
+                
             except Exception as factory_error:
-                debug_log(f"❌ AudioProcessor factory test failed: {factory_error}", "error")
-                st.error(f"AudioProcessor factory test failed: {factory_error}")
+                debug_log(f"❌ Enhanced AudioProcessor factory test failed: {factory_error}", "error")
+                st.error(f"Enhanced AudioProcessor factory test failed: {factory_error}")
+                
+                # Try to provide recovery options
+                if debug_mode:
+                    with st.expander("🔧 Factory Function Debug Information"):
+                        st.text(f"Factory error details: {factory_error}")
+                        st.text(f"Session state keys: {list(st.session_state.keys())}")
+                        if hasattr(st.session_state, 'audio_processor'):
+                            st.text(f"AudioProcessor type: {type(st.session_state.audio_processor)}")
+                            st.text(f"AudioProcessor is None: {st.session_state.audio_processor is None}")
+                        st.text("Try reloading the model and recreating the AudioProcessor.")
                 return
             
-            # ENHANCED: Multiple WebRTC initialization strategies with progressive fallbacks
-            debug_log("Strategy 1: Attempting full-featured WebRTC initialization")
+            # Determine optimal WebRTC strategy based on environment
+            is_linux = platform.system() == "Linux"
+            is_docker = os.path.exists("/.dockerenv")
+            is_ci = any(ci_var in os.environ for ci_var in ["CI", "GITHUB_ACTIONS", "TRAVIS"])
+            environment_type = "problematic" if (is_linux or is_docker or is_ci) else "standard"
             
-            # Strategy 1: Full-featured WebRTC with all options
+            debug_log(f"Environment type determined: {environment_type}")
+            
+            # ENHANCED: Multiple WebRTC initialization strategies with environment-specific optimizations
+            debug_log("Starting enhanced WebRTC initialization with environment-specific strategies")
+            
+            # Strategy 1: Environment-optimized configuration
+            strategy_1_config = {
+                "key": "audio-classification-env-optimized",
+                "mode": WebRtcMode.SENDONLY,
+                "audio_processor_factory": safe_audio_processor_factory,
+            }
+            
+            if environment_type == "standard":
+                # Full-featured configuration for standard environments
+                strategy_1_config.update({
+                    "rtc_configuration": {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+                    "media_stream_constraints": {"audio": True, "video": False},
+                    "async_processing": True,
+                })
+                debug_log("Strategy 1: Using full-featured configuration for standard environment")
+            else:
+                # Minimal configuration for problematic environments
+                strategy_1_config.update({
+                    "media_stream_constraints": {"audio": True, "video": False},
+                })
+                debug_log("Strategy 1: Using minimal configuration for problematic environment")
+            
             try:
-                debug_log("Attempting full WebRTC configuration")
-                
-                webrtc_ctx = webrtc_streamer(
-                    key="audio-classification",
-                    mode=WebRtcMode.SENDONLY,
-                    audio_processor_factory=safe_audio_processor_factory,
-                    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-                    media_stream_constraints={
-                        "audio": True,
-                        "video": False,
-                    },
-                    async_processing=True,
-                )
+                debug_log("Strategy 1: Attempting environment-optimized WebRTC configuration")
+                webrtc_ctx = webrtc_streamer(**strategy_1_config)
                 webrtc_initialized = True
-                debug_log("✅ Full WebRTC initialization successful")
-                st.success("✅ WebRTC streaming ready (Full Configuration)")
+                debug_log("✅ Strategy 1: Environment-optimized WebRTC initialization successful")
+                st.success("✅ WebRTC streaming ready (Environment-Optimized Configuration)")
                 
-            except Exception as full_webrtc_error:
-                debug_log(f"Strategy 1 failed: {full_webrtc_error}", "warning")
-                st.warning(f"フル機能WebRTC初期化に失敗: {str(full_webrtc_error)[:100]}...")
+            except Exception as strategy_1_error:
+                debug_log(f"Strategy 1 failed: {strategy_1_error}", "warning")
+                st.warning(f"環境最適化WebRTC初期化に失敗: {str(strategy_1_error)[:100]}...")
                 
-                # Strategy 2: Minimal WebRTC configuration
-                debug_log("Strategy 2: Attempting minimal WebRTC configuration")
+                # Strategy 2: Alternative STUN server configuration
+                debug_log("Strategy 2: Attempting alternative STUN server configuration")
                 try:
-                    debug_log("Attempting minimal WebRTC configuration")
                     webrtc_ctx = webrtc_streamer(
-                        key="audio-classification-minimal",
+                        key="audio-classification-alt-stun",
                         mode=WebRtcMode.SENDONLY,
                         audio_processor_factory=safe_audio_processor_factory,
+                        rtc_configuration={
+                            "iceServers": [
+                                {"urls": ["stun:stun1.l.google.com:19302"]},
+                                {"urls": ["stun:stun2.l.google.com:19302"]},
+                            ]
+                        },
                         media_stream_constraints={"audio": True, "video": False},
                     )
                     webrtc_initialized = True
-                    debug_log("✅ Minimal WebRTC initialization successful")
-                    st.success("✅ WebRTC streaming ready (Minimal Configuration)")
+                    debug_log("✅ Strategy 2: Alternative STUN server configuration successful")
+                    st.success("✅ WebRTC streaming ready (Alternative STUN Configuration)")
                     
-                except Exception as minimal_webrtc_error:
-                    debug_log(f"Strategy 2 failed: {minimal_webrtc_error}", "warning")
-                    st.warning(f"最小WebRTC初期化に失敗: {str(minimal_webrtc_error)[:100]}...")
+                except Exception as strategy_2_error:
+                    debug_log(f"Strategy 2 failed: {strategy_2_error}", "warning")
+                    st.warning(f"代替STUN WebRTC初期化に失敗: {str(strategy_2_error)[:100]}...")
                     
-                    # Strategy 3: Bare-bones WebRTC
-                    debug_log("Strategy 3: Attempting bare-bones WebRTC configuration")
+                    # Strategy 3: No STUN server configuration
+                    debug_log("Strategy 3: Attempting no STUN server configuration")
                     try:
-                        debug_log("Attempting bare-bones WebRTC configuration")
                         webrtc_ctx = webrtc_streamer(
-                            key="audio-classification-basic",
+                            key="audio-classification-no-stun",
                             mode=WebRtcMode.SENDONLY,
                             audio_processor_factory=safe_audio_processor_factory,
+                            media_stream_constraints={"audio": True, "video": False},
                         )
                         webrtc_initialized = True
-                        debug_log("✅ Bare-bones WebRTC initialization successful")
-                        st.success("✅ WebRTC streaming ready (Basic Configuration)")
+                        debug_log("✅ Strategy 3: No STUN server configuration successful")
+                        st.success("✅ WebRTC streaming ready (No STUN Configuration)")
                         
-                    except Exception as basic_webrtc_error:
-                        debug_log(f"Strategy 3 failed: {basic_webrtc_error}", "error")
-                        st.error(f"基本WebRTC初期化に失敗: {str(basic_webrtc_error)[:100]}...")
-                        webrtc_initialized = False
+                    except Exception as strategy_3_error:
+                        debug_log(f"Strategy 3 failed: {strategy_3_error}", "warning")
+                        st.warning(f"STUN無しWebRTC初期化に失敗: {str(strategy_3_error)[:100]}...")
+                        
+                        # Strategy 4: Bare-bones WebRTC (minimal possible configuration)
+                        debug_log("Strategy 4: Attempting bare-bones WebRTC configuration")
+                        try:
+                            webrtc_ctx = webrtc_streamer(
+                                key="audio-classification-barebone",
+                                mode=WebRtcMode.SENDONLY,
+                                audio_processor_factory=safe_audio_processor_factory,
+                            )
+                            webrtc_initialized = True
+                            debug_log("✅ Strategy 4: Bare-bones WebRTC initialization successful")
+                            st.success("✅ WebRTC streaming ready (Bare-bones Configuration)")
+                            
+                        except Exception as strategy_4_error:
+                            debug_log(f"Strategy 4 failed: {strategy_4_error}", "warning")
+                            st.warning(f"最小WebRTC初期化に失敗: {str(strategy_4_error)[:100]}...")
+                            
+                            # Strategy 5: Last resort - recreation attempt
+                            debug_log("Strategy 5: Last resort - attempting AudioProcessor recreation and WebRTC retry")
+                            try:
+                                # Force recreation of AudioProcessor
+                                if hasattr(st.session_state, 'model') and st.session_state.model is not None:
+                                    debug_log("Strategy 5: Recreating AudioProcessor for last resort attempt")
+                                    st.session_state.audio_processor = AudioProcessor(
+                                        st.session_state.model, 
+                                        target_sr=22050, 
+                                        chunk_length=44100
+                                    )
+                                    
+                                    # Try the simplest possible WebRTC configuration
+                                    webrtc_ctx = webrtc_streamer(
+                                        key="audio-classification-last-resort",
+                                        mode=WebRtcMode.SENDONLY,
+                                        audio_processor_factory=lambda: st.session_state.audio_processor,
+                                    )
+                                    webrtc_initialized = True
+                                    debug_log("✅ Strategy 5: Last resort WebRTC initialization successful")
+                                    st.success("✅ WebRTC streaming ready (Last Resort Configuration)")
+                                else:
+                                    raise RuntimeError("Model not available for AudioProcessor recreation")
+                                    
+                            except Exception as strategy_5_error:
+                                debug_log(f"Strategy 5 failed: {strategy_5_error}", "error")
+                                st.error(f"最終手段WebRTC初期化に失敗: {str(strategy_5_error)[:100]}...")
+                                webrtc_initialized = False
             
             if not webrtc_initialized:
-                debug_log("❌ All WebRTC initialization strategies failed", "error")
-                st.error("❌ すべてのWebRTC初期化戦略が失敗しました")
+                debug_log("❌ All enhanced WebRTC initialization strategies failed", "error")
+                st.error("❌ すべての強化WebRTC初期化戦略が失敗しました")
                 
-                # Provide detailed error information in debug mode
-                if debug_mode:
-                    with st.expander("🔍 WebRTC Initialization Error Details"):
-                        st.text("All WebRTC initialization strategies failed:")
-                        st.text("1. Full configuration failed")
-                        st.text("2. Minimal configuration failed") 
-                        st.text("3. Bare-bones configuration failed")
-                        st.text("\nThis may be due to environment compatibility issues.")
+                # Provide comprehensive error information and troubleshooting
+                with st.expander("🔍 Enhanced WebRTC Initialization Error Details"):
+                    st.text("All enhanced WebRTC initialization strategies failed:")
+                    st.text("1. Environment-optimized configuration failed")
+                    st.text("2. Alternative STUN server configuration failed") 
+                    st.text("3. No STUN server configuration failed")
+                    st.text("4. Bare-bones configuration failed")
+                    st.text("5. Last resort (recreation) configuration failed")
+                    st.text(f"\nEnvironment type: {environment_type}")
+                    st.text(f"Platform: {platform.system()}")
+                    st.text(f"Docker environment: {os.path.exists('/.dockerenv')}")
+                    st.text(f"CI environment: {any(ci_var in os.environ for ci_var in ['CI', 'GITHUB_ACTIONS', 'TRAVIS'])}")
+                    
+                # Provide recovery suggestions
+                st.info("🔧 **トラブルシューティング推奨事項:**")
+                st.text("1. ブラウザを更新してページをリロード")
+                st.text("2. 別のブラウザ (Chrome推奨) を試用")
+                st.text("3. ブラウザの音声許可設定を確認")
+                st.text("4. ファイルアップロード機能を使用")
+                
+                # Add recovery buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("🔄 AudioProcessor再作成", help="AudioProcessorを強制的に再作成します"):
+                        try:
+                            if hasattr(st.session_state, 'model') and st.session_state.model is not None:
+                                st.session_state.audio_processor = AudioProcessor(
+                                    st.session_state.model, 
+                                    target_sr=22050, 
+                                    chunk_length=44100
+                                )
+                                st.success("AudioProcessor再作成完了。ページをリロードしてください。")
+                                st.experimental_rerun()
+                            else:
+                                st.error("モデルが利用できません。")
+                        except Exception as recreation_error:
+                            st.error(f"AudioProcessor再作成失敗: {recreation_error}")
+                
+                with col2:
+                    if st.button("🗑️ セッション状態リセット", help="全セッション状態をリセットします"):
+                        for key in list(st.session_state.keys()):
+                            del st.session_state[key]
+                        st.success("セッション状態リセット完了。ページをリロードしてください。")
+                        st.experimental_rerun()
                 
                 # Alternative solution: File upload method
                 st.warning("⚠️ WebRTC録音が利用できません。代替方法を提供します:")
