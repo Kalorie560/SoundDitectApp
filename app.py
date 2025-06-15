@@ -4,14 +4,6 @@ import torch.nn as nn
 import torchaudio
 import torchaudio.transforms as T
 
-# Configure torchaudio backend to prevent deprecation warnings
-try:
-    # Try setting backend if the method exists (older versions)
-    if hasattr(torchaudio, 'set_audio_backend'):
-        torchaudio.set_audio_backend("soundfile")
-except Exception:
-    # For newer versions, backend is handled automatically
-    pass
 import numpy as np
 import matplotlib.pyplot as plt
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
