@@ -46,6 +46,91 @@ import queue
 import threading
 from typing import List, Tuple
 import time
+import traceback
+import psutil
+import gc
+import logging
+
+# Debug logging setup
+def setup_debug_logging():
+    """Setup comprehensive debug logging"""
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+        ]
+    )
+    return logging.getLogger(__name__)
+
+# Global debug logger
+debug_logger = setup_debug_logging()
+
+def log_memory_usage(phase: str):
+    """Log current memory usage"""
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        debug_logger.info(f"[{phase}] Memory Usage: RSS={memory_info.rss / 1024 / 1024:.1f}MB, VMS={memory_info.vms / 1024 / 1024:.1f}MB")
+        
+        # Also show in Streamlit if available
+        if 'st' in globals():
+            st.info(f"🔧 [{phase}] Memory: {memory_info.rss / 1024 / 1024:.1f}MB RSS")
+    except Exception as e:
+        debug_logger.warning(f"Could not log memory usage: {e}")
+
+def debug_log(message: str, level: str = "info"):
+    """Enhanced debug logging with Streamlit integration"""
+    debug_logger.info(f"🔍 DEBUG: {message}")
+    
+    # Also show in Streamlit if available
+    if 'st' in globals():
+        if level == "error":
+            st.error(f"🔧 DEBUG: {message}")
+        elif level == "warning":
+            st.warning(f"🔧 DEBUG: {message}")
+        else:
+            st.info(f"🔧 DEBUG: {message}")
+
+def safe_execute(func, description: str, *args, **kwargs):
+    """Safely execute a function with comprehensive error logging"""
+    debug_log(f"Starting: {description}")
+    log_memory_usage(f"Before {description}")
+    
+    try:
+        result = func(*args, **kwargs)
+        debug_log(f"✅ Completed: {description}")
+        log_memory_usage(f"After {description}")
+        return result, None
+    except Exception as e:
+        error_msg = f"❌ Failed: {description}"
+        debug_log(error_msg, "error")
+        
+        # Log full traceback
+        full_traceback = traceback.format_exc()
+        debug_logger.error(f"Full traceback for {description}:\n{full_traceback}")
+        
+        if 'st' in globals():
+            st.error(f"🔧 ERROR in {description}: {str(e)}")
+            with st.expander("🔍 Full Error Details"):
+                st.text(full_traceback)
+        
+        log_memory_usage(f"Error in {description}")
+        return None, e
+
+def _save_uploaded_file(uploaded_file, temp_path: str):
+    """Helper function to save uploaded file"""
+    with open(temp_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return temp_path
+
+def _cleanup_temp_file(temp_path: str):
+    """Helper function to clean up temporary file"""
+    import os
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+        return True
+    return False
 
 # CNN Model Definition (based on specifications for 1D CNN)
 class CNN(nn.Module):
@@ -379,31 +464,70 @@ def create_adaptive_cnn(input_length, channels, kernel_sizes, strides, classifie
 # Enhanced Model loading utility with training config matching
 def load_model(model_path: str) -> nn.Module:
     """Load the trained CNN model from .pth file with training config matching"""
+    debug_log(f"🚀 Starting model loading from: {model_path}")
+    log_memory_usage("Model Loading Start")
+    
     try:
-        # Load state dict first to inspect keys and shapes
-        state_dict = torch.load(model_path, map_location='cpu')
+        # Step 1: Load state dict
+        debug_log("Step 1: Loading state dictionary from file")
+        state_dict, load_error = safe_execute(
+            lambda: torch.load(model_path, map_location='cpu'),
+            "Loading PyTorch state dict"
+        )
         
-        # Analyze keys to determine architecture
+        if load_error:
+            debug_log(f"Failed to load state dict: {load_error}", "error")
+            return None
+        
+        debug_log(f"✅ State dict loaded successfully. Keys: {len(state_dict.keys())}")
+        debug_log(f"State dict keys preview: {list(state_dict.keys())[:10]}")
+        
+        # Step 2: Analyze architecture
+        debug_log("Step 2: Analyzing model architecture")
         has_individual_layers = any(key.startswith(('conv1.', 'conv2.', 'conv3.', 'fc1.', 'fc2.', 'fc3.')) for key in state_dict.keys())
         has_sequential_layers = any(key.startswith(('cnn.', 'classifier.')) for key in state_dict.keys())
         has_attention = any(key.startswith('attention.') for key in state_dict.keys())
         
+        debug_log(f"Architecture analysis: Individual={has_individual_layers}, Sequential={has_sequential_layers}, Attention={has_attention}")
+        
         # Use training config input length
         input_length = 44100  # Training configuration default
+        debug_log(f"Using input length: {input_length}")
         
-        # Extract comprehensive architecture parameters from checkpoint
+        # Step 3: Extract architecture parameters
+        debug_log("Step 3: Extracting model architecture parameters")
         if has_sequential_layers:
+            debug_log("📐 Sequential architecture detected - analyzing training configuration")
             st.info("Sequential architecture detected - analyzing training configuration")
-            channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes = extract_cnn_architecture(state_dict, 'sequential')
+            
+            arch_params, arch_error = safe_execute(
+                extract_cnn_architecture,
+                "Extracting sequential architecture parameters",
+                state_dict, 'sequential'
+            )
+            
+            if arch_error:
+                debug_log(f"Failed to extract architecture: {arch_error}", "error")
+                return None
+                
+            channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes = arch_params
+            
+            debug_log(f"Extracted parameters: channels={channels}, kernels={kernel_sizes}, strides={strides}")
             st.info(f"Detected channels: {channels}")
             st.info(f"Detected kernel sizes: {kernel_sizes}")
             st.info(f"Detected strides: {strides}")
             if classifier_input_size:
+                debug_log(f"Classifier input size: {classifier_input_size}")
                 st.info(f"Detected classifier input size: {classifier_input_size}")
             if fc_sizes:
+                debug_log(f"FC layer sizes: {fc_sizes}")
                 st.info(f"Detected FC layer sizes: {fc_sizes}")
             
-            model = CNNSequential(
+            # Step 4: Create model instance
+            debug_log("Step 4: Creating CNNSequential model instance")
+            model, model_error = safe_execute(
+                CNNSequential,
+                "Creating CNNSequential model",
                 input_length=input_length, 
                 channels=channels, 
                 kernel_sizes=kernel_sizes, 
@@ -412,81 +536,239 @@ def load_model(model_path: str) -> nn.Module:
                 fc_sizes=fc_sizes
             )
             
-            # Add attention if present
+            if model_error:
+                debug_log(f"Failed to create model: {model_error}", "error")
+                return None
+            
+            # Step 5: Add attention if present
             if has_attention:
+                debug_log("Step 5: Adding attention mechanism")
                 st.info("Attention mechanism detected")
                 if attention_hidden_dim:
+                    debug_log(f"Creating attention with hidden_dim={attention_hidden_dim}, heads={attention_num_heads}")
                     st.info(f"Attention hidden dim: {attention_hidden_dim}, heads: {attention_num_heads}")
-                    model.attention = MultiHeadAttention(attention_hidden_dim, attention_num_heads)
+                    attention, attention_error = safe_execute(
+                        MultiHeadAttention,
+                        "Creating MultiHeadAttention",
+                        attention_hidden_dim, attention_num_heads
+                    )
+                    if attention_error:
+                        debug_log(f"Failed to create attention: {attention_error}", "warning")
+                        st.warning("Failed to create attention mechanism, continuing without it")
+                    else:
+                        model.attention = attention
                 else:
-                    model.attention = MultiHeadAttention(256, 8)  # Training config defaults
+                    debug_log("Creating default attention mechanism")
+                    attention, attention_error = safe_execute(
+                        MultiHeadAttention,
+                        "Creating default MultiHeadAttention",
+                        256, 8
+                    )
+                    if attention_error:
+                        debug_log(f"Failed to create default attention: {attention_error}", "warning")
+                        st.warning("Failed to create default attention mechanism, continuing without it")
+                    else:
+                        model.attention = attention
                 
         elif has_individual_layers:
+            debug_log("📐 Individual layer architecture detected - analyzing training configuration")
             st.info("Individual layer architecture detected - analyzing training configuration")
-            channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes = extract_cnn_architecture(state_dict, 'individual')
+            
+            arch_params, arch_error = safe_execute(
+                extract_cnn_architecture,
+                "Extracting individual architecture parameters",
+                state_dict, 'individual'
+            )
+            
+            if arch_error:
+                debug_log(f"Failed to extract individual architecture: {arch_error}", "error")
+                return None
+                
+            channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes = arch_params
+            
+            debug_log(f"Individual layer parameters: channels={channels}, kernels={kernel_sizes}, strides={strides}")
             st.info(f"Detected channels: {channels}")
             st.info(f"Detected kernel sizes: {kernel_sizes}")
             st.info(f"Detected strides: {strides}")
             if classifier_input_size:
+                debug_log(f"Individual classifier input size: {classifier_input_size}")
                 st.info(f"Detected classifier input size: {classifier_input_size}")
             if fc_sizes:
+                debug_log(f"Individual FC layer sizes: {fc_sizes}")
                 st.info(f"Detected FC layer sizes: {fc_sizes}")
+            
+            debug_log("Step 4: Creating adaptive CNN model")
+            model, model_error = safe_execute(
+                create_adaptive_cnn,
+                "Creating adaptive CNN model",
+                input_length, channels, kernel_sizes, strides, classifier_input_size, fc_sizes
+            )
+            
+            if model_error:
+                debug_log(f"Failed to create adaptive model: {model_error}", "error")
+                return None
                 
-            model = create_adaptive_cnn(input_length, channels, kernel_sizes, strides, classifier_input_size, fc_sizes)
         else:
             # Try to adapt by key mapping with training config as fallback
+            debug_log("⚠️ Unknown architecture - attempting key mapping with training config")
             st.warning("Unknown architecture - attempting key mapping with training config")
-            # Create model with training config parameters
-            model = CNNSequential(
+            
+            debug_log("Step 4: Creating fallback CNNSequential model with training config")
+            model, model_error = safe_execute(
+                CNNSequential,
+                "Creating fallback CNNSequential model",
                 input_length=44100,  # Training config
                 channels=[64, 128, 256],  # Training config
                 kernel_sizes=[3, 3, 3],  # Training config
                 strides=[1, 2, 2],  # Training config
                 fc_sizes=[512, 256]  # Training config
             )
-            state_dict = adapt_state_dict_keys(state_dict)
+            
+            if model_error:
+                debug_log(f"Failed to create fallback model: {model_error}", "error")
+                return None
+            
+            debug_log("Adapting state dict keys for fallback model")
+            adapted_state_dict, adapt_error = safe_execute(
+                adapt_state_dict_keys,
+                "Adapting state dict keys",
+                state_dict
+            )
+            
+            if adapt_error:
+                debug_log(f"Failed to adapt state dict: {adapt_error}", "warning")
+                st.warning("State dict adaptation failed, using original")
+            else:
+                state_dict = adapted_state_dict
         
-        # Load state dict with progressive error handling
-        try:
-            model.load_state_dict(state_dict, strict=True)
+        # Step 6: Load state dict with progressive error handling
+        debug_log("Step 6: Loading state dict into model (CRITICAL STEP)")
+        log_memory_usage("Before State Dict Loading")
+        
+        # Attempt 1: Strict loading
+        debug_log("Attempt 1: Strict state dict loading")
+        strict_result, strict_error = safe_execute(
+            lambda: model.load_state_dict(state_dict, strict=True),
+            "Strict state dict loading"
+        )
+        
+        if strict_error is None:
+            debug_log("✅ Strict loading successful")
             st.success("✅ Model loaded successfully with strict loading")
-        except RuntimeError as e:
-            st.warning(f"⚠️ Strict loading failed: {str(e)[:200]}...")
+        else:
+            debug_log(f"⚠️ Strict loading failed: {strict_error}", "warning")
+            st.warning(f"⚠️ Strict loading failed: {str(strict_error)[:200]}...")
             st.info("🔄 Attempting non-strict loading...")
-            try:
-                missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            
+            # Attempt 2: Non-strict loading
+            debug_log("Attempt 2: Non-strict state dict loading")
+            non_strict_result, non_strict_error = safe_execute(
+                lambda: model.load_state_dict(state_dict, strict=False),
+                "Non-strict state dict loading"
+            )
+            
+            if non_strict_error is None:
+                missing_keys, unexpected_keys = non_strict_result
+                debug_log(f"Non-strict loading completed: missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")
                 if missing_keys:
+                    debug_log(f"Missing keys: {missing_keys[:5]}..." if len(missing_keys) > 5 else f"Missing keys: {missing_keys}")
                     st.warning(f"Missing keys: {len(missing_keys)} keys")
                 if unexpected_keys:
+                    debug_log(f"Unexpected keys: {unexpected_keys[:5]}..." if len(unexpected_keys) > 5 else f"Unexpected keys: {unexpected_keys}")
                     st.warning(f"Unexpected keys: {len(unexpected_keys)} keys")
                 st.info("✅ Non-strict loading completed - some parameters may be randomly initialized")
-            except Exception as e2:
-                st.error(f"❌ Non-strict loading also failed: {e2}")
-                # Try one more fallback with training config
+            else:
+                debug_log(f"❌ Non-strict loading also failed: {non_strict_error}", "error")
+                st.error(f"❌ Non-strict loading also failed: {non_strict_error}")
+                
+                # Attempt 3: Final fallback with training config
+                debug_log("Attempt 3: Final fallback with training configuration model")
                 st.info("🔄 Attempting fallback with training configuration model...")
-                try:
-                    fallback_model = CNNSequential(
-                        input_length=44100,
-                        channels=[64, 128, 256],
-                        kernel_sizes=[3, 3, 3],
-                        strides=[1, 2, 2], 
-                        fc_sizes=[512, 256]
-                    )
-                    if has_attention:
-                        fallback_model.attention = MultiHeadAttention(256, 8)
-                    fallback_model.load_state_dict(state_dict, strict=False)
-                    st.success("✅ Fallback loading with training config successful")
-                    fallback_model.eval()
-                    return fallback_model
-                except Exception as e3:
-                    st.error(f"❌ All loading attempts failed: {e3}")
+                
+                fallback_model, fallback_error = safe_execute(
+                    CNNSequential,
+                    "Creating final fallback model",
+                    input_length=44100,
+                    channels=[64, 128, 256],
+                    kernel_sizes=[3, 3, 3],
+                    strides=[1, 2, 2], 
+                    fc_sizes=[512, 256]
+                )
+                
+                if fallback_error:
+                    debug_log(f"Failed to create fallback model: {fallback_error}", "error")
+                    st.error(f"❌ All loading attempts failed: {fallback_error}")
                     return None
                 
-        model.eval()
+                if has_attention:
+                    debug_log("Adding attention to fallback model")
+                    fallback_attention, fallback_attention_error = safe_execute(
+                        MultiHeadAttention,
+                        "Creating fallback attention",
+                        256, 8
+                    )
+                    if fallback_attention_error is None:
+                        fallback_model.attention = fallback_attention
+                
+                fallback_load_result, fallback_load_error = safe_execute(
+                    lambda: fallback_model.load_state_dict(state_dict, strict=False),
+                    "Fallback model state dict loading"
+                )
+                
+                if fallback_load_error:
+                    debug_log(f"❌ Final fallback failed: {fallback_load_error}", "error")
+                    st.error(f"❌ All loading attempts failed: {fallback_load_error}")
+                    return None
+                else:
+                    debug_log("✅ Fallback loading successful")
+                    st.success("✅ Fallback loading with training config successful")
+                    model = fallback_model
+        
+        # Step 7: Set model to evaluation mode
+        debug_log("Step 7: Setting model to evaluation mode")
+        eval_result, eval_error = safe_execute(
+            lambda: model.eval(),
+            "Setting model to evaluation mode"
+        )
+        
+        if eval_error:
+            debug_log(f"Failed to set eval mode: {eval_error}", "warning")
+            st.warning("Failed to set model to evaluation mode, but continuing")
+        
+        # Step 8: Model validation
+        debug_log("Step 8: Validating loaded model")
+        log_memory_usage("Model Loading Complete")
+        
+        # Test with dummy input
+        dummy_test_result, dummy_test_error = safe_execute(
+            lambda: model(torch.randn(1, 1, 44100)),
+            "Model validation with dummy input"
+        )
+        
+        if dummy_test_error:
+            debug_log(f"❌ Model validation failed: {dummy_test_error}", "error")
+            st.error(f"❌ Model validation failed: {dummy_test_error}")
+            return None
+        else:
+            debug_log(f"✅ Model validation successful. Output shape: {dummy_test_result.shape}")
+            st.success(f"✅ Model validation successful. Output shape: {dummy_test_result.shape}")
+        
+        debug_log("🎉 Model loading completed successfully")
         return model
         
     except Exception as e:
+        error_msg = f"❌ Unexpected error in model loading: {e}"
+        debug_log(error_msg, "error")
+        
+        # Log full traceback for unexpected errors
+        full_traceback = traceback.format_exc()
+        debug_logger.error(f"Unexpected error in load_model:\n{full_traceback}")
+        
         st.error(f"❌ モデル読み込みエラー: {e}")
+        with st.expander("🔍 Full Error Details"):
+            st.text(full_traceback)
+        
+        log_memory_usage("Model Loading Failed")
         return None
 
 def adapt_state_dict_keys(state_dict):
@@ -666,51 +948,160 @@ def main():
     if 'results' not in st.session_state:
         st.session_state.results = None
     
-    # Load model
+    # Add debug mode toggle
+    debug_mode = st.sidebar.checkbox("🔧 Debug Mode", value=True, help="Show detailed debugging information")
+    
+    if debug_mode:
+        st.sidebar.info("🔧 Debug mode enabled - detailed logging will be shown")
+        with st.sidebar.expander("🔧 System Info"):
+            debug_log("System information check")
+            try:
+                st.write(f"**Python:** {sys.version}")
+                st.write(f"**PyTorch:** {torch.__version__}")
+                st.write(f"**Torchaudio:** {torchaudio.__version__}")
+                st.write(f"**NumPy:** {np.__version__}")
+                log_memory_usage("App Start")
+            except Exception as e:
+                st.error(f"Failed to get system info: {e}")
+    
+    # Load model with comprehensive debugging
     if model_file is not None:
+        debug_log("🎯 Model file uploaded, starting loading process")
+        
         try:
-            # Save uploaded file temporarily
+            # Step 1: Save uploaded file temporarily
+            debug_log("Step 1: Saving uploaded file temporarily")
             temp_model_path = f"temp_model_{int(time.time())}.pth"
-            with open(temp_model_path, "wb") as f:
-                f.write(model_file.getbuffer())
             
-            # Load model
+            file_save_result, file_save_error = safe_execute(
+                lambda: _save_uploaded_file(model_file, temp_model_path),
+                "Saving uploaded model file"
+            )
+            
+            if file_save_error:
+                debug_log(f"Failed to save uploaded file: {file_save_error}", "error")
+                st.error(f"Failed to save uploaded file: {file_save_error}")
+                return
+            
+            debug_log(f"✅ Model file saved to: {temp_model_path}")
+            
+            # Step 2: Load model with comprehensive debugging
+            debug_log("Step 2: Starting comprehensive model loading")
             with st.spinner("モデル読み込み中..."):
-                model = load_model(temp_model_path)
-                if model is not None:
-                    st.session_state.model = model
+                log_memory_usage("Before Model Loading")
+                
+                model_load_result, model_load_error = safe_execute(
+                    load_model,
+                    "Complete model loading process",
+                    temp_model_path
+                )
+                
+                if model_load_error:
+                    debug_log(f"Model loading failed: {model_load_error}", "error")
+                    st.error("モデルの読み込みに失敗しました")
+                elif model_load_result is not None:
+                    debug_log("✅ Model loading successful, storing in session state")
+                    st.session_state.model = model_load_result
+                    
+                    # Force garbage collection after model loading
+                    gc.collect()
+                    log_memory_usage("After Model Loading")
+                    
                     st.success("モデルが正常に読み込まれました！")
+                    debug_log("🎉 Model successfully loaded and stored in session state")
                 else:
+                    debug_log("Model loading returned None", "error")
                     st.error("モデルの読み込みに失敗しました")
             
-            # Clean up temp file
-            import os
-            if os.path.exists(temp_model_path):
-                os.remove(temp_model_path)
+            # Step 3: Clean up temp file
+            debug_log("Step 3: Cleaning up temporary file")
+            cleanup_result, cleanup_error = safe_execute(
+                lambda: _cleanup_temp_file(temp_model_path),
+                "Cleaning up temporary file"
+            )
+            
+            if cleanup_error:
+                debug_log(f"Failed to cleanup temp file: {cleanup_error}", "warning")
+                st.warning(f"Failed to cleanup temporary file: {cleanup_error}")
+            else:
+                debug_log("✅ Temporary file cleaned up successfully")
                 
         except Exception as e:
+            error_msg = f"Unexpected error in main model loading: {e}"
+            debug_log(error_msg, "error")
+            
+            full_traceback = traceback.format_exc()
+            debug_logger.error(f"Unexpected error in main model loading:\n{full_traceback}")
+            
             st.error(f"モデル読み込みエラー: {e}")
+            if debug_mode:
+                with st.expander("🔍 Full Error Details"):
+                    st.text(full_traceback)
     
-    # Audio recording section
+    # Audio recording section with comprehensive debugging
     if st.session_state.model is not None:
+        debug_log("🎙️ Model loaded successfully, initializing audio recording section")
         st.header("🎙️ 音声録音")
         
-        # Create audio processor with training config chunk length
+        # Step 1: Create audio processor with debugging
         if st.session_state.audio_processor is None:
-            st.session_state.audio_processor = AudioProcessor(st.session_state.model, chunk_length=44100)
+            debug_log("Step 1: Creating AudioProcessor instance")
+            
+            processor_result, processor_error = safe_execute(
+                AudioProcessor,
+                "Creating AudioProcessor with loaded model",
+                st.session_state.model, chunk_length=44100
+            )
+            
+            if processor_error:
+                debug_log(f"Failed to create AudioProcessor: {processor_error}", "error")
+                st.error(f"Failed to create audio processor: {processor_error}")
+                return
+            else:
+                st.session_state.audio_processor = processor_result
+                debug_log("✅ AudioProcessor created successfully")
         
-        # WebRTC streamer
-        webrtc_ctx = webrtc_streamer(
-            key="audio-classification",
-            mode=WebRtcMode.SENDONLY,
-            audio_processor_factory=lambda: st.session_state.audio_processor,
-            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-            media_stream_constraints={
-                "audio": True,
-                "video": False,
-            },
-            async_processing=True,
-        )
+        # Step 2: Initialize WebRTC streamer with debugging
+        debug_log("Step 2: Initializing WebRTC streamer (CRITICAL SECTION)")
+        log_memory_usage("Before WebRTC Initialization")
+        
+        try:
+            webrtc_result, webrtc_error = safe_execute(
+                lambda: webrtc_streamer(
+                    key="audio-classification",
+                    mode=WebRtcMode.SENDONLY,
+                    audio_processor_factory=lambda: st.session_state.audio_processor,
+                    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+                    media_stream_constraints={
+                        "audio": True,
+                        "video": False,
+                    },
+                    async_processing=True,
+                ),
+                "WebRTC streamer initialization"
+            )
+            
+            if webrtc_error:
+                debug_log(f"❌ WebRTC initialization failed: {webrtc_error}", "error")
+                st.error(f"WebRTC initialization failed: {webrtc_error}")
+                return
+            else:
+                webrtc_ctx = webrtc_result
+                debug_log("✅ WebRTC streamer initialized successfully")
+                log_memory_usage("After WebRTC Initialization")
+        
+        except Exception as e:
+            error_msg = f"Unexpected error in WebRTC initialization: {e}"
+            debug_log(error_msg, "error")
+            
+            full_traceback = traceback.format_exc()
+            debug_logger.error(f"Unexpected WebRTC error:\n{full_traceback}")
+            
+            st.error(f"WebRTC initialization error: {e}")
+            if debug_mode:
+                with st.expander("🔍 WebRTC Error Details"):
+                    st.text(full_traceback)
+            return
         
         # Recording status
         if webrtc_ctx.state.playing:
