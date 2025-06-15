@@ -1,73 +1,73 @@
 # SoundDitectApp
 
-A Streamlit web application for real-time audio recording and classification using a 1D CNN model.
+1D CNNモデルを使用したリアルタイム音声録音・分類のStreamlitウェブアプリケーションです。
 
-## Features
+## 機能
 
-- **Real-time Audio Recording**: Uses `streamlit-webrtc` to capture microphone audio from the browser
-- **1D CNN Classification**: Classifies audio segments every 1 second as OK (0) or NG (1)
-- **Audio Processing**: Automatically handles audio preprocessing (22050 Hz sampling, mono conversion, length normalization)
-- **Visualization**: Displays results on a time-domain waveform graph with color-coded segments
-- **Model Support**: Loads pre-trained PyTorch models (.pth files)
+- **リアルタイム音声録音**: `streamlit-webrtc`を使用してブラウザからマイク音声をキャプチャ
+- **1D CNN分類**: 音声セグメントを1秒ごとにOK (0) またはNG (1) として分類
+- **音声処理**: 音声前処理を自動処理（22050 Hzサンプリング、モノラル変換、長さ正規化）
+- **可視化**: 時間領域波形グラフに色分けされたセグメントで結果を表示
+- **モデルサポート**: 事前学習済みPyTorchモデル（.pthファイル）の読み込み
 
-## Installation
+## インストール
 
-1. Clone the repository:
+1. リポジトリをクローン:
 ```bash
 git clone https://github.com/Kalorie560/SoundDitectApp.git
 cd SoundDitectApp
 ```
 
-2. Install dependencies:
+2. 依存関係をインストール:
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage
+## 使用方法
 
-1. Run the Streamlit app:
+1. Streamlitアプリを実行:
 ```bash
 streamlit run app.py
 ```
 
-2. Upload your trained model (.pth file) using the sidebar
+2. サイドバーを使用して学習済みモデル（.pthファイル）をアップロード
 
-3. Click "Start" to begin recording audio
+3. 「Start」をクリックして音声録音を開始
 
-4. Speak into your microphone - the app will process 1-second chunks in real-time
+4. マイクに向かって話す - アプリは1秒ごとのチャンクをリアルタイムで処理
 
-5. Click "Stop" to end recording and view results
+5. 「Stop」をクリックして録音を終了し、結果を表示
 
-## Model Requirements
+## モデル要件
 
-The application expects a PyTorch model with the following specifications:
+アプリケーションは以下の仕様のPyTorchモデルを想定しています：
 
-- **Input Shape**: `(batch_size, channels, length) = (1, 1, 22050)`
-- **Output**: Binary classification (2 classes: OK=0, NG=1)
-- **Architecture**: 1D CNN using `nn.Conv1d` layers
-- **Audio Format**: 22050 Hz sampling rate, mono channel, 1-second segments
+- **入力形状**: `(batch_size, channels, length) = (1, 1, 22050)`
+- **出力**: 二値分類（2クラス: OK=0, NG=1）
+- **アーキテクチャ**: `nn.Conv1d`レイヤーを使用した1D CNN
+- **音声フォーマット**: 22050 Hzサンプリングレート、モノラルチャンネル、1秒セグメント
 
-## Audio Processing
+## 音声処理
 
-The app automatically handles:
-- Resampling to 22050 Hz
-- Mono conversion (if stereo input)
-- Length normalization (padding or truncation to 22050 samples)
-- Real-time chunking into 1-second segments
+アプリは以下を自動で処理します：
+- 22050 Hzへのリサンプリング
+- モノラル変換（ステレオ入力の場合）
+- 長さ正規化（22050サンプルへのパディングまたは切り詰め）
+- 1秒セグメントへのリアルタイムチャンク分割
 
-## Results Visualization
+## 結果の可視化
 
-After recording, the app displays:
-- Audio waveform plot with color-coded background
-- Green segments: OK classification
-- Red segments: NG classification
-- Summary statistics (total duration, OK/NG counts)
-- Detailed second-by-second results
+録音後、アプリは以下を表示します：
+- 色分けされた背景の音声波形プロット
+- 緑のセグメント: OK分類
+- 赤のセグメント: NG分類
+- 要約統計（総持続時間、OK/NG数）
+- 詳細な秒単位の結果
 
-## Technical Details
+## 技術詳細
 
-- Built with Streamlit and streamlit-webrtc
-- Uses PyTorch for model inference
-- Audio processing with torchaudio and numpy
-- Visualization with matplotlib
-- Thread-safe audio buffering and processing
+- StreamlitとStreamlit-webrtcで構築
+- モデル推論にPyTorchを使用
+- torchaudioとnumpyで音声処理
+- matplotlibで可視化
+- スレッドセーフな音声バッファリングと処理
