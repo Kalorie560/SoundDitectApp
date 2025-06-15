@@ -666,6 +666,37 @@ def load_model(model_path: str) -> nn.Module:
         debug_log("Step 6: Loading state dict into model (CRITICAL STEP)")
         log_memory_usage("Before State Dict Loading")
         
+        # CRITICAL FIX: Filter out incompatible attention weights before loading
+        if has_attention and hasattr(model, 'attention') and model.attention is not None:
+            debug_log("Filtering out incompatible attention weights from state dict")
+            filtered_state_dict = {}
+            attention_keys_removed = []
+            
+            for key, value in state_dict.items():
+                if key.startswith('attention.'):
+                    # Check if the attention weight dimensions match our model
+                    if key.endswith('.weight'):
+                        if hasattr(model.attention, key.split('.', 1)[1]):
+                            model_weight = getattr(model.attention, key.split('.', 1)[1])
+                            if hasattr(model_weight, 'weight') and model_weight.weight.shape != value.shape:
+                                debug_log(f"Skipping incompatible attention weight {key}: model={model_weight.weight.shape} vs saved={value.shape}")
+                                attention_keys_removed.append(key)
+                                continue
+                    elif key.endswith('.bias'):
+                        # Also skip corresponding bias if weight was skipped
+                        weight_key = key.replace('.bias', '.weight')
+                        if weight_key in attention_keys_removed:
+                            debug_log(f"Skipping corresponding bias {key}")
+                            attention_keys_removed.append(key)
+                            continue
+                
+                filtered_state_dict[key] = value
+            
+            if attention_keys_removed:
+                debug_log(f"Removed {len(attention_keys_removed)} incompatible attention parameters")
+                st.info(f"Filtered out {len(attention_keys_removed)} incompatible attention parameters")
+                state_dict = filtered_state_dict
+        
         # Attempt 1: Strict loading
         debug_log("Attempt 1: Strict state dict loading")
         strict_result, strict_error = safe_execute(
@@ -739,8 +770,40 @@ def load_model(model_path: str) -> nn.Module:
                     else:
                         debug_log(f"Failed to create fallback attention: {fallback_attention_error}", "warning")
                 
+                # Apply the same attention filter for fallback model
+                fallback_state_dict = state_dict
+                if has_attention and hasattr(fallback_model, 'attention') and fallback_model.attention is not None:
+                    debug_log("Filtering out incompatible attention weights for fallback model")
+                    filtered_fallback_state_dict = {}
+                    fallback_attention_keys_removed = []
+                    
+                    for key, value in state_dict.items():
+                        if key.startswith('attention.'):
+                            # Check if the attention weight dimensions match our fallback model
+                            if key.endswith('.weight'):
+                                if hasattr(fallback_model.attention, key.split('.', 1)[1]):
+                                    model_weight = getattr(fallback_model.attention, key.split('.', 1)[1])
+                                    if hasattr(model_weight, 'weight') and model_weight.weight.shape != value.shape:
+                                        debug_log(f"Skipping incompatible fallback attention weight {key}: model={model_weight.weight.shape} vs saved={value.shape}")
+                                        fallback_attention_keys_removed.append(key)
+                                        continue
+                            elif key.endswith('.bias'):
+                                # Also skip corresponding bias if weight was skipped
+                                weight_key = key.replace('.bias', '.weight')
+                                if weight_key in fallback_attention_keys_removed:
+                                    debug_log(f"Skipping corresponding fallback bias {key}")
+                                    fallback_attention_keys_removed.append(key)
+                                    continue
+                        
+                        filtered_fallback_state_dict[key] = value
+                    
+                    if fallback_attention_keys_removed:
+                        debug_log(f"Removed {len(fallback_attention_keys_removed)} incompatible fallback attention parameters")
+                        st.info(f"Filtered out {len(fallback_attention_keys_removed)} incompatible fallback attention parameters")
+                        fallback_state_dict = filtered_fallback_state_dict
+                
                 fallback_load_result, fallback_load_error = safe_execute(
-                    lambda: fallback_model.load_state_dict(state_dict, strict=False),
+                    lambda: fallback_model.load_state_dict(fallback_state_dict, strict=False),
                     "Fallback model state dict loading"
                 )
                 
