@@ -68,6 +68,7 @@ streamlit run app.py
 - **自動アーキテクチャ適応**: チェックポイントの重みサイズを解析して動的にモデルを構築
 - **柔軟なチャンネル数**: 32→64→128 や 64→128→256 など異なるチャンnel構成に自動対応
 - **可変カーネルサイズ**: kernel_size=3, 128, 256など様々なサイズに対応
+- **分類器入力サイズ自動調整**: チェックポイントから実際の分類器入力次元を抽出して使用
 - **プログレッシブ読み込み**: 
   1. 厳密読み込み (strict=True)
   2. 部分読み込み (strict=False) 
@@ -113,6 +114,7 @@ streamlit run app.py
    - チェックポイントの重みを解析して適切なモデル構造を自動構築
    - 異なるチャンネル数（32→64→128 vs 64→128→256）に対応
    - 異なるカーネルサイズ（3 vs 256）に対応
+   - 分類器入力次元の自動検出（例: チェックポイント [512, 256] vs 計算値 [512, 5376] の不整合を解決）
 
 2. **プログレッシブ読み込み** 📚
    - 厳密読み込み (strict=True) → 部分読み込み (strict=False) → キーマッピング → レガシー読み込み
@@ -125,6 +127,7 @@ streamlit run app.py
 - "Individual layer architecture detected" - 個別レイヤー形式のモデル  
 - "Attention mechanism detected" - Attention付きモデル
 - "Detected channels: [64, 128, 256], kernel sizes: [3, 3, 3]" - 検出されたアーキテクチャ
+- "Detected classifier input size: 256" - 分類器入力次元の自動検出
 - "Model loaded successfully with strict loading" - 成功
 - "Non-strict loading completed" - 一部パラメータが初期化される可能性
 
