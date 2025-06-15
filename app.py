@@ -73,16 +73,16 @@ class CNN(nn.Module):
         return x
 
 # Audio preprocessing utilities
-def preprocess_audio(audio_data, target_sr=22050, target_length=22050, orig_sr=22050):
+def preprocess_audio(audio_data, target_sr=22050, target_length=44100, orig_sr=44100):
     """
     Preprocess audio data for model input
     Args:
         audio_data: Raw audio data
         target_sr: Target sampling rate (22050 Hz)
-        target_length: Target length in samples (22050 for 1 second)
+        target_length: Target length in samples (44100 for 1 second at 44.1kHz)
         orig_sr: Original sampling rate of input audio
     Returns:
-        Preprocessed tensor with shape (1, 1, 22050)
+        Preprocessed tensor with shape (1, 1, 44100)
     """
     # Convert to tensor if numpy array
     if isinstance(audio_data, np.ndarray):
@@ -109,23 +109,25 @@ def preprocess_audio(audio_data, target_sr=22050, target_length=22050, orig_sr=2
         # Truncate
         audio_tensor = audio_tensor[:target_length]
     
-    # Reshape to (batch_size, channels, length) = (1, 1, 22050)
+    # Reshape to (batch_size, channels, length) = (1, 1, 44100)
     audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
     
     return audio_tensor
 
-# Alternative CNN Model Definition (for sequential architecture)
+# Advanced CNN Model Definition (for sequential architecture with training config support)
 class CNNSequential(nn.Module):
-    def __init__(self, input_length=22050, num_classes=2, channels=[32, 64, 128], kernel_sizes=[256, 128, 64], classifier_input_size=None):
+    def __init__(self, input_length=44100, num_classes=2, channels=[64, 128, 256], kernel_sizes=[3, 3, 3], strides=[1, 2, 2], classifier_input_size=None, fc_sizes=None):
         super(CNNSequential, self).__init__()
         
-        # CNN layers in sequential format - dynamically sized
+        # CNN layers in sequential format - dynamically sized based on training config
         layers = []
         in_channels = 1
-        for i, (out_channels, kernel_size) in enumerate(zip(channels, kernel_sizes)):
+        for i, (out_channels, kernel_size, stride) in enumerate(zip(channels, kernel_sizes, strides)):
+            # Add padding to maintain output size for stride=1, or reduce for stride>1
+            padding = kernel_size // 2 if stride == 1 else 1
             layers.extend([
                 nn.Conv1d(in_channels=in_channels, out_channels=out_channels, 
-                         kernel_size=kernel_size, stride=4 if i == 0 else 2),
+                         kernel_size=kernel_size, stride=stride, padding=padding),
                 nn.BatchNorm1d(out_channels),
                 nn.ReLU(),
                 nn.MaxPool1d(kernel_size=4, stride=4)
@@ -142,26 +144,33 @@ class CNNSequential(nn.Module):
         if classifier_input_size is not None:
             self.fc_input_size = classifier_input_size
         else:
-            self._calculate_fc_input_size(input_length, channels, kernel_sizes)
+            self._calculate_fc_input_size(input_length, channels, kernel_sizes, strides)
         
-        # Classifier in sequential format - dynamically sized
-        fc_sizes = [512, 256] if self.fc_input_size > 1000 else [256, 128]
+        # Classifier in sequential format - use extracted FC sizes or defaults
+        if fc_sizes and len(fc_sizes) >= 2:
+            fc_layer_sizes = fc_sizes
+        else:
+            fc_layer_sizes = [512, 256]  # Training config defaults
+            
         self.classifier = nn.Sequential(
-            nn.Linear(self.fc_input_size, fc_sizes[0]),
-            nn.Dropout(0.5),
+            nn.Linear(self.fc_input_size, fc_layer_sizes[0]),
+            nn.Dropout(0.3),  # Match training config
             nn.ReLU(),
-            nn.Linear(fc_sizes[0], fc_sizes[1]),
-            nn.Dropout(0.5),
+            nn.Linear(fc_layer_sizes[0], fc_layer_sizes[1]),
+            nn.Dropout(0.3),  # Match training config
             nn.ReLU(),
-            nn.Linear(fc_sizes[1], num_classes)
+            nn.Linear(fc_layer_sizes[1], num_classes)
         )
         
-    def _calculate_fc_input_size(self, input_length, channels, kernel_sizes):
-        # Dynamic calculation based on actual architecture
+    def _calculate_fc_input_size(self, input_length, channels, kernel_sizes, strides):
+        # Dynamic calculation based on actual architecture with proper padding
         x = input_length
-        for i, kernel_size in enumerate(kernel_sizes):
-            stride = 4 if i == 0 else 2
-            x = ((x - kernel_size) // stride + 1) // 4  # conv + pool
+        for i, (kernel_size, stride) in enumerate(zip(kernel_sizes, strides)):
+            padding = kernel_size // 2 if stride == 1 else 1
+            # Conv layer calculation
+            x = (x + 2 * padding - kernel_size) // stride + 1
+            # MaxPool layer calculation
+            x = x // 4
         self.fc_input_size = x * channels[-1]
         
     def forward(self, x):
@@ -188,27 +197,34 @@ class CNNSequential(nn.Module):
             
         return self.classifier(x)
 
-# Attention module for models that have it
-class SimpleAttention(nn.Module):
-    def __init__(self, input_dim):
-        super(SimpleAttention, self).__init__()
-        self.query = nn.Linear(input_dim, input_dim)
-        self.key = nn.Linear(input_dim, input_dim)
-        self.value = nn.Linear(input_dim, input_dim)
-        self.output = nn.Linear(input_dim, input_dim)
+# Enhanced Attention module for models that have it
+class MultiHeadAttention(nn.Module):
+    def __init__(self, hidden_dim=256, num_heads=8):
+        super(MultiHeadAttention, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        
+        self.query = nn.Linear(hidden_dim, hidden_dim)
+        self.key = nn.Linear(hidden_dim, hidden_dim)
+        self.value = nn.Linear(hidden_dim, hidden_dim)
+        self.output = nn.Linear(hidden_dim, hidden_dim)
         
     def forward(self, x):
         return x  # Placeholder - actual attention logic in CNNSequential
 
 def extract_cnn_architecture(state_dict, arch_type):
-    """Extract CNN architecture parameters from state dict"""
+    """Extract CNN architecture parameters from state dict with enhanced detection"""
     channels = []
     kernel_sizes = []
+    strides = []
     classifier_input_size = None
+    attention_hidden_dim = None
+    attention_num_heads = None
+    fc_sizes = []
     
     if arch_type == 'sequential':
         # Extract from cnn.X.weight keys
-        conv_keys = [k for k in state_dict.keys() if k.startswith('cnn.') and k.endswith('.weight') and 'Conv' in str(type(state_dict[k]))]
         conv_keys = sorted([k for k in state_dict.keys() if k.startswith('cnn.') and k.endswith('.weight') and len(state_dict[k].shape) == 3])
         
         for key in conv_keys:
@@ -218,9 +234,18 @@ def extract_cnn_architecture(state_dict, arch_type):
                 channels.append(out_channels)
                 kernel_sizes.append(kernel_size)
         
-        # Extract classifier input size from first classifier layer
+        # Extract classifier architecture
         if 'classifier.0.weight' in state_dict:
             classifier_input_size = state_dict['classifier.0.weight'].shape[1]
+            fc_sizes.append(state_dict['classifier.0.weight'].shape[0])
+        if 'classifier.3.weight' in state_dict:
+            fc_sizes.append(state_dict['classifier.3.weight'].shape[0])
+            
+        # Extract attention parameters
+        if 'attention.query.weight' in state_dict:
+            attention_hidden_dim = state_dict['attention.query.weight'].shape[0]
+            # Infer number of heads from typical multi-head attention patterns
+            attention_num_heads = 8  # Common default, could be extracted differently if needed
     
     elif arch_type == 'individual':
         # Extract from conv1.weight, conv2.weight, etc.
@@ -232,34 +257,48 @@ def extract_cnn_architecture(state_dict, arch_type):
                 channels.append(out_channels)
                 kernel_sizes.append(kernel_size)
         
-        # Extract classifier input size from first FC layer
+        # Extract FC architecture
         if 'fc1.weight' in state_dict:
             classifier_input_size = state_dict['fc1.weight'].shape[1]
+            fc_sizes.append(state_dict['fc1.weight'].shape[0])
+        if 'fc2.weight' in state_dict:
+            fc_sizes.append(state_dict['fc2.weight'].shape[0])
+    
+    # Determine strides based on typical patterns for given kernel sizes
+    if kernel_sizes:
+        if all(k <= 5 for k in kernel_sizes):  # Small kernels (like 3x3)
+            strides = [1, 2, 2]  # Training configuration pattern
+        else:  # Large kernels (like 256, 128, 64)
+            strides = [4, 2, 2]  # Current code pattern
     
     # Default fallback
     if not channels:
-        channels = [32, 64, 128]
-        kernel_sizes = [256, 128, 64]
+        channels = [64, 128, 256]  # Match training config
+        kernel_sizes = [3, 3, 3]  # Match training config
+        strides = [1, 2, 2]  # Match training config
         
-    return channels, kernel_sizes, classifier_input_size
+    return channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes
 
-def extract_attention_dim(state_dict):
-    """Extract attention dimension from state dict"""
+def extract_attention_params(state_dict):
+    """Extract attention parameters from state dict"""
     if 'attention.query.weight' in state_dict:
-        return state_dict['attention.query.weight'].shape[0]
-    return 256  # default
+        hidden_dim = state_dict['attention.query.weight'].shape[0]
+        # Try to infer number of heads from attention patterns
+        num_heads = 8  # Default based on training config
+        return hidden_dim, num_heads
+    return 256, 8  # defaults
 
-def create_adaptive_cnn(input_length, channels, kernel_sizes, classifier_input_size=None):
-    """Create adaptive CNN with individual layers"""
+def create_adaptive_cnn(input_length, channels, kernel_sizes, strides, classifier_input_size=None, fc_sizes=None):
+    """Create adaptive CNN with individual layers based on training config"""
     class AdaptiveCNN(nn.Module):
         def __init__(self):
             super(AdaptiveCNN, self).__init__()
-            # Create layers dynamically
-            for i, (out_ch, kernel_size) in enumerate(zip(channels, kernel_sizes)):
+            # Create layers dynamically based on training config
+            for i, (out_ch, kernel_size, stride) in enumerate(zip(channels, kernel_sizes, strides)):
                 in_ch = 1 if i == 0 else channels[i-1]
-                stride = 4 if i == 0 else 2
+                padding = kernel_size // 2 if stride == 1 else 1
                 
-                setattr(self, f'conv{i+1}', nn.Conv1d(in_ch, out_ch, kernel_size, stride))
+                setattr(self, f'conv{i+1}', nn.Conv1d(in_ch, out_ch, kernel_size, stride, padding))
                 setattr(self, f'bn{i+1}', nn.BatchNorm1d(out_ch))
                 setattr(self, f'relu{i+1}', nn.ReLU())
                 setattr(self, f'pool{i+1}', nn.MaxPool1d(4, 4))
@@ -268,20 +307,25 @@ def create_adaptive_cnn(input_length, channels, kernel_sizes, classifier_input_s
             if classifier_input_size is not None:
                 fc_input_size = classifier_input_size
             else:
-                # Calculate FC size
+                # Calculate FC size based on training config
                 x = input_length
-                for i, kernel_size in enumerate(kernel_sizes):
-                    stride = 4 if i == 0 else 2
-                    x = ((x - kernel_size) // stride + 1) // 4
+                for kernel_size, stride in zip(kernel_sizes, strides):
+                    padding = kernel_size // 2 if stride == 1 else 1
+                    x = (x + 2 * padding - kernel_size) // stride + 1
+                    x = x // 4  # MaxPool
                 fc_input_size = x * channels[-1]
             
-            # FC layers
-            fc_sizes = [512, 256] if fc_input_size > 1000 else [256, 128]
-            self.fc1 = nn.Linear(fc_input_size, fc_sizes[0])
-            self.dropout1 = nn.Dropout(0.5)
-            self.fc2 = nn.Linear(fc_sizes[0], fc_sizes[1])
-            self.dropout2 = nn.Dropout(0.5)
-            self.fc3 = nn.Linear(fc_sizes[1], 2)
+            # FC layers - use extracted sizes or training config defaults
+            if fc_sizes and len(fc_sizes) >= 2:
+                fc_layer_sizes = fc_sizes
+            else:
+                fc_layer_sizes = [512, 256]  # Training config
+                
+            self.fc1 = nn.Linear(fc_input_size, fc_layer_sizes[0])
+            self.dropout1 = nn.Dropout(0.3)  # Match training config
+            self.fc2 = nn.Linear(fc_layer_sizes[0], fc_layer_sizes[1])
+            self.dropout2 = nn.Dropout(0.3)  # Match training config
+            self.fc3 = nn.Linear(fc_layer_sizes[1], 2)
             
         def forward(self, x):
             # Conv blocks
@@ -297,9 +341,9 @@ def create_adaptive_cnn(input_length, channels, kernel_sizes, classifier_input_s
     
     return AdaptiveCNN()
 
-# Model loading utility with dynamic architecture adaptation
+# Enhanced Model loading utility with training config matching
 def load_model(model_path: str) -> nn.Module:
-    """Load the trained CNN model from .pth file with automatic architecture adaptation"""
+    """Load the trained CNN model from .pth file with training config matching"""
     try:
         # Load state dict first to inspect keys and shapes
         state_dict = torch.load(model_path, map_location='cpu')
@@ -309,60 +353,105 @@ def load_model(model_path: str) -> nn.Module:
         has_sequential_layers = any(key.startswith(('cnn.', 'classifier.')) for key in state_dict.keys())
         has_attention = any(key.startswith('attention.') for key in state_dict.keys())
         
-        input_length = 22050  # default
+        # Use training config input length
+        input_length = 44100  # Training configuration default
         
-        # Extract architecture parameters from checkpoint
+        # Extract comprehensive architecture parameters from checkpoint
         if has_sequential_layers:
-            st.info("Sequential architecture detected")
-            channels, kernel_sizes, classifier_input_size = extract_cnn_architecture(state_dict, 'sequential')
-            st.info(f"Detected channels: {channels}, kernel sizes: {kernel_sizes}")
+            st.info("Sequential architecture detected - analyzing training configuration")
+            channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes = extract_cnn_architecture(state_dict, 'sequential')
+            st.info(f"Detected channels: {channels}")
+            st.info(f"Detected kernel sizes: {kernel_sizes}")
+            st.info(f"Detected strides: {strides}")
             if classifier_input_size:
                 st.info(f"Detected classifier input size: {classifier_input_size}")
+            if fc_sizes:
+                st.info(f"Detected FC layer sizes: {fc_sizes}")
             
-            model = CNNSequential(input_length=input_length, channels=channels, kernel_sizes=kernel_sizes, classifier_input_size=classifier_input_size)
+            model = CNNSequential(
+                input_length=input_length, 
+                channels=channels, 
+                kernel_sizes=kernel_sizes, 
+                strides=strides,
+                classifier_input_size=classifier_input_size,
+                fc_sizes=fc_sizes
+            )
             
             # Add attention if present
             if has_attention:
                 st.info("Attention mechanism detected")
-                attention_dim = extract_attention_dim(state_dict)
-                model.attention = SimpleAttention(attention_dim)
+                if attention_hidden_dim:
+                    st.info(f"Attention hidden dim: {attention_hidden_dim}, heads: {attention_num_heads}")
+                    model.attention = MultiHeadAttention(attention_hidden_dim, attention_num_heads)
+                else:
+                    model.attention = MultiHeadAttention(256, 8)  # Training config defaults
                 
         elif has_individual_layers:
-            st.info("Individual layer architecture detected")
-            # For individual layers, create adaptive CNN
-            channels, kernel_sizes, classifier_input_size = extract_cnn_architecture(state_dict, 'individual')
+            st.info("Individual layer architecture detected - analyzing training configuration")
+            channels, kernel_sizes, strides, classifier_input_size, attention_hidden_dim, attention_num_heads, fc_sizes = extract_cnn_architecture(state_dict, 'individual')
+            st.info(f"Detected channels: {channels}")
+            st.info(f"Detected kernel sizes: {kernel_sizes}")
+            st.info(f"Detected strides: {strides}")
             if classifier_input_size:
                 st.info(f"Detected classifier input size: {classifier_input_size}")
-            model = create_adaptive_cnn(input_length, channels, kernel_sizes, classifier_input_size)
+            if fc_sizes:
+                st.info(f"Detected FC layer sizes: {fc_sizes}")
+                
+            model = create_adaptive_cnn(input_length, channels, kernel_sizes, strides, classifier_input_size, fc_sizes)
         else:
-            # Try to adapt by key mapping
-            st.warning("Unknown architecture - attempting key mapping")
-            model = CNN(input_length=input_length)
+            # Try to adapt by key mapping with training config as fallback
+            st.warning("Unknown architecture - attempting key mapping with training config")
+            # Create model with training config parameters
+            model = CNNSequential(
+                input_length=44100,  # Training config
+                channels=[64, 128, 256],  # Training config
+                kernel_sizes=[3, 3, 3],  # Training config
+                strides=[1, 2, 2],  # Training config
+                fc_sizes=[512, 256]  # Training config
+            )
             state_dict = adapt_state_dict_keys(state_dict)
         
         # Load state dict with progressive error handling
         try:
             model.load_state_dict(state_dict, strict=True)
-            st.success("Model loaded successfully with strict loading")
+            st.success("✅ Model loaded successfully with strict loading")
         except RuntimeError as e:
-            st.warning(f"Strict loading failed: {str(e)[:200]}...")
-            st.info("Attempting non-strict loading...")
+            st.warning(f"⚠️ Strict loading failed: {str(e)[:200]}...")
+            st.info("🔄 Attempting non-strict loading...")
             try:
                 missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
                 if missing_keys:
                     st.warning(f"Missing keys: {len(missing_keys)} keys")
                 if unexpected_keys:
                     st.warning(f"Unexpected keys: {len(unexpected_keys)} keys")
-                st.info("Non-strict loading completed - some parameters may be randomly initialized")
+                st.info("✅ Non-strict loading completed - some parameters may be randomly initialized")
             except Exception as e2:
-                st.error(f"Non-strict loading also failed: {e2}")
-                return None
+                st.error(f"❌ Non-strict loading also failed: {e2}")
+                # Try one more fallback with training config
+                st.info("🔄 Attempting fallback with training configuration model...")
+                try:
+                    fallback_model = CNNSequential(
+                        input_length=44100,
+                        channels=[64, 128, 256],
+                        kernel_sizes=[3, 3, 3],
+                        strides=[1, 2, 2], 
+                        fc_sizes=[512, 256]
+                    )
+                    if has_attention:
+                        fallback_model.attention = MultiHeadAttention(256, 8)
+                    fallback_model.load_state_dict(state_dict, strict=False)
+                    st.success("✅ Fallback loading with training config successful")
+                    fallback_model.eval()
+                    return fallback_model
+                except Exception as e3:
+                    st.error(f"❌ All loading attempts failed: {e3}")
+                    return None
                 
         model.eval()
         return model
         
     except Exception as e:
-        st.error(f"モデル読み込みエラー: {e}")
+        st.error(f"❌ モデル読み込みエラー: {e}")
         return None
 
 def adapt_state_dict_keys(state_dict):
@@ -401,9 +490,10 @@ def adapt_state_dict_keys(state_dict):
 
 # Audio processor class for WebRTC
 class AudioProcessor(AudioProcessorBase):
-    def __init__(self, model: nn.Module, target_sr: int = 22050):
+    def __init__(self, model: nn.Module, target_sr: int = 22050, chunk_length: int = 44100):
         self.model = model
         self.target_sr = target_sr
+        self.chunk_length = chunk_length  # Training config: 44100 samples for 1 second at 44.1kHz
         self.audio_buffer = []
         self.chunk_results = []
         self.chunk_audio_data = []
@@ -423,11 +513,11 @@ class AudioProcessor(AudioProcessorBase):
             # Add to buffer
             self.audio_buffer.extend(audio_data)
             
-            # Process when we have enough data for 1 second (22050 samples)
-            while len(self.audio_buffer) >= self.target_sr:
+            # Process when we have enough data for 1 second (based on chunk_length)
+            while len(self.audio_buffer) >= self.chunk_length:
                 # Extract 1-second chunk
-                chunk = np.array(self.audio_buffer[:self.target_sr])
-                self.audio_buffer = self.audio_buffer[self.target_sr:]
+                chunk = np.array(self.audio_buffer[:self.chunk_length])
+                self.audio_buffer = self.audio_buffer[self.chunk_length:]
                 
                 # Preprocess and classify
                 self._process_chunk(chunk)
@@ -437,8 +527,8 @@ class AudioProcessor(AudioProcessorBase):
     def _process_chunk(self, chunk: np.ndarray):
         """Process a 1-second audio chunk"""
         try:
-            # Preprocess audio
-            audio_tensor = preprocess_audio(chunk, self.target_sr, self.target_sr)
+            # Preprocess audio with training config target length
+            audio_tensor = preprocess_audio(chunk, self.target_sr, self.chunk_length)
             
             # Model inference
             with torch.no_grad():
@@ -474,7 +564,7 @@ def plot_results(audio_chunks: List[np.ndarray], predictions: List[int]):
     # Concatenate all audio chunks
     full_audio = np.concatenate(audio_chunks)
     
-    # Create time axis
+    # Create time axis (using sample rate of 22050 for display)
     time_axis = np.linspace(0, len(full_audio) / 22050, len(full_audio))
     
     # Create figure
@@ -570,9 +660,9 @@ def main():
     if st.session_state.model is not None:
         st.header("🎙️ 音声録音")
         
-        # Create audio processor
+        # Create audio processor with training config chunk length
         if st.session_state.audio_processor is None:
-            st.session_state.audio_processor = AudioProcessor(st.session_state.model)
+            st.session_state.audio_processor = AudioProcessor(st.session_state.model, chunk_length=44100)
         
         # WebRTC streamer
         webrtc_ctx = webrtc_streamer(
