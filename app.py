@@ -1535,10 +1535,16 @@ def main():
                     else:
                         raise RuntimeError("audio_processor not initialized and model unavailable for recreation")
                 
-                # Step 3: Validate AudioProcessor type and methods
-                if not isinstance(st.session_state.audio_processor, AudioProcessor):
-                    debug_log(f"Factory: audio_processor has wrong type: {type(st.session_state.audio_processor)}", "error")
-                    raise RuntimeError(f"audio_processor has wrong type, expected AudioProcessor, got {type(st.session_state.audio_processor)}")
+                # Step 3: Validate AudioProcessor type and methods (using flexible type checking)
+                audio_processor_type = type(st.session_state.audio_processor)
+                audio_processor_name = audio_processor_type.__name__
+                
+                # Check if the object is an AudioProcessor by class name (handles module reloading issues)
+                if audio_processor_name != 'AudioProcessor':
+                    debug_log(f"Factory: audio_processor has wrong class name: {audio_processor_name}", "error")
+                    raise RuntimeError(f"audio_processor has wrong class name, expected 'AudioProcessor', got '{audio_processor_name}'")
+                
+                debug_log(f"Factory: AudioProcessor type validation passed: {audio_processor_type}")
                 
                 # Step 4: Check if it has the required recv_audio method
                 if not hasattr(st.session_state.audio_processor, 'recv_audio'):
