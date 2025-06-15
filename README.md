@@ -47,6 +47,29 @@ streamlit run app.py
 - **アーキテクチャ**: `nn.Conv1d`レイヤーを使用した1D CNN
 - **音声フォーマット**: 22050 Hzサンプリングレート、モノラルチャンネル、1秒セグメント
 
+### サポートされるモデルアーキテクチャ
+
+アプリケーションは自動的にモデルアーキテクチャを検出し、以下の形式をサポートします：
+
+1. **個別レイヤーアーキテクチャ**: 
+   - レイヤーが個別に定義されている（`conv1`, `conv2`, `fc1`, etc.）
+   - 従来のモデル定義方式
+
+2. **Sequential アーキテクチャ**:
+   - レイヤーが`nn.Sequential`で組織化されている（`cnn.0`, `cnn.1`, `classifier.0`, etc.）
+   - よりモジュラーなモデル設計
+
+3. **Attention付きモデル**:
+   - Attentionメカニズムを含むモデル（`attention.query`, `attention.key`, etc.）
+   - より高度な特徴抽出
+
+### 柔軟なモデル読み込み
+
+- **自動アーキテクチャ検出**: モデルファイルのキーを分析して適切なアーキテクチャを自動選択
+- **キーマッピング**: 異なる命名規則のモデル間での自動変換
+- **部分読み込み**: 一部のレイヤーが不一致でも可能な限り読み込み
+- **フォールバック機能**: 複数の読み込み戦略を順次試行
+
 ## 音声処理
 
 アプリは以下を自動で処理します：
@@ -71,3 +94,29 @@ streamlit run app.py
 - torchaudioとnumpyで音声処理
 - matplotlibで可視化
 - スレッドセーフな音声バッファリングと処理
+
+## トラブルシューティング
+
+### モデル読み込みエラー
+
+**問題**: `Missing key(s) in state_dict` または `Unexpected key(s) in state_dict` エラー
+
+**解決方法**: 
+1. アプリケーションは自動的に異なるアーキテクチャを検出し適応します
+2. エラーが発生した場合、アプリは以下の順序で読み込みを試行します：
+   - 厳密な読み込み (strict=True)
+   - 部分読み込み (strict=False) 
+   - キーマッピングによる変換
+   - レガシー読み込み
+
+**対応状況の確認**: モデル読み込み時にStreamlitアプリで以下のメッセージを確認：
+- "Sequential architecture detected" - Sequential形式のモデル
+- "Individual layer architecture detected" - 個別レイヤー形式のモデル
+- "Attention mechanism detected" - Attention付きモデル
+- "Unknown architecture - attempting key mapping" - 自動変換を試行
+
+### 音声品質の改善
+
+- 静かな環境での録音を推奨
+- マイクとの距離を適切に保つ
+- 1秒以上の音声で十分なデータを確保

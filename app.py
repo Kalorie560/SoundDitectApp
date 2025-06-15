@@ -2,6 +2,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import torchaudio
+import torchaudio.transforms as T
 import numpy as np
 import matplotlib.pyplot as plt
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, ClientSettings
@@ -72,13 +73,14 @@ class CNN(nn.Module):
         return x
 
 # Audio preprocessing utilities
-def preprocess_audio(audio_data, target_sr=22050, target_length=22050):
+def preprocess_audio(audio_data, target_sr=22050, target_length=22050, orig_sr=22050):
     """
     Preprocess audio data for model input
     Args:
         audio_data: Raw audio data
         target_sr: Target sampling rate (22050 Hz)
         target_length: Target length in samples (22050 for 1 second)
+        orig_sr: Original sampling rate of input audio
     Returns:
         Preprocessed tensor with shape (1, 1, 22050)
     """
@@ -92,9 +94,10 @@ def preprocess_audio(audio_data, target_sr=22050, target_length=22050):
     if audio_tensor.dim() > 1:
         audio_tensor = torch.mean(audio_tensor, dim=0)
     
-    # Resample if needed (assuming input might be different sample rate)
-    # For simplicity, we'll assume input is already at correct sample rate
-    # In production, you might need: torchaudio.transforms.Resample(orig_freq, target_sr)
+    # Resample if needed using proper torchaudio transforms
+    if orig_sr != target_sr:
+        resampler = T.Resample(orig_freq=orig_sr, new_freq=target_sr)
+        audio_tensor = resampler(audio_tensor)
     
     # Adjust length: pad with zeros or truncate
     current_length = audio_tensor.size(0)
@@ -111,21 +114,197 @@ def preprocess_audio(audio_data, target_sr=22050, target_length=22050):
     
     return audio_tensor
 
-# Model loading utility
-def load_model(model_path: str) -> CNN:
-    """Load the trained CNN model from .pth file"""
-    model = CNN()
+# Alternative CNN Model Definition (for sequential architecture)
+class CNNSequential(nn.Module):
+    def __init__(self, input_length=22050, num_classes=2):
+        super(CNNSequential, self).__init__()
+        
+        # CNN layers in sequential format
+        self.cnn = nn.Sequential(
+            # First conv block
+            nn.Conv1d(in_channels=1, out_channels=32, kernel_size=256, stride=4),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=4, stride=4),
+            # Second conv block  
+            nn.Conv1d(in_channels=32, out_channels=64, kernel_size=128, stride=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=4, stride=4),
+            # Third conv block
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=64, stride=2),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=4, stride=4)
+        )
+        
+        # Attention mechanism (if present in saved model)
+        self.attention = None
+        
+        # Calculate FC input size
+        self._calculate_fc_input_size(input_length)
+        
+        # Classifier in sequential format
+        self.classifier = nn.Sequential(
+            nn.Linear(self.fc_input_size, 256),
+            nn.Dropout(0.5),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.Dropout(0.5),
+            nn.ReLU(),
+            nn.Linear(128, num_classes)
+        )
+        
+    def _calculate_fc_input_size(self, input_length):
+        # Same calculation as original CNN
+        x = input_length
+        x = ((x - 256) // 4 + 1) // 4
+        x = ((x - 128) // 2 + 1) // 4
+        x = ((x - 64) // 2 + 1) // 4
+        self.fc_input_size = x * 128
+        
+    def forward(self, x):
+        x = self.cnn(x)
+        
+        # Apply attention if available
+        if self.attention is not None:
+            # Basic attention mechanism
+            batch_size, channels, length = x.size()
+            x_flat = x.view(batch_size, channels * length)
+            
+            # Attention weights
+            query = self.attention.query(x_flat)
+            key = self.attention.key(x_flat)
+            value = self.attention.value(x_flat)
+            
+            # Scaled dot-product attention
+            attention_weights = torch.softmax(torch.matmul(query, key.transpose(-2, -1)) / (query.size(-1) ** 0.5), dim=-1)
+            x_attended = torch.matmul(attention_weights, value)
+            x = self.attention.output(x_attended)
+        else:
+            # Flatten for classifier
+            x = x.view(x.size(0), -1)
+            
+        return self.classifier(x)
+
+# Attention module for models that have it
+class SimpleAttention(nn.Module):
+    def __init__(self, input_dim):
+        super(SimpleAttention, self).__init__()
+        self.query = nn.Linear(input_dim, input_dim)
+        self.key = nn.Linear(input_dim, input_dim)
+        self.value = nn.Linear(input_dim, input_dim)
+        self.output = nn.Linear(input_dim, input_dim)
+        
+    def forward(self, x):
+        return x  # Placeholder - actual attention logic in CNNSequential
+
+# Model loading utility with architecture detection
+def load_model(model_path: str) -> nn.Module:
+    """Load the trained CNN model from .pth file with automatic architecture detection"""
     try:
-        model.load_state_dict(torch.load(model_path, map_location='cpu'))
+        # Load state dict first to inspect keys
+        state_dict = torch.load(model_path, map_location='cpu')
+        
+        # Analyze keys to determine architecture
+        has_individual_layers = any(key.startswith(('conv1.', 'conv2.', 'conv3.', 'fc1.', 'fc2.', 'fc3.')) for key in state_dict.keys())
+        has_sequential_layers = any(key.startswith(('cnn.', 'classifier.')) for key in state_dict.keys())
+        has_attention = any(key.startswith('attention.') for key in state_dict.keys())
+        
+        # Determine input length from first conv layer
+        input_length = 22050  # default
+        if 'conv1.weight' in state_dict:
+            # Individual layer architecture
+            conv_weight = state_dict['conv1.weight']
+        elif 'cnn.0.weight' in state_dict:
+            # Sequential architecture
+            conv_weight = state_dict['cnn.0.weight']
+        else:
+            conv_weight = None
+            
+        # Create appropriate model
+        if has_sequential_layers:
+            st.info("Sequential architecture detected")
+            model = CNNSequential(input_length=input_length)
+            
+            # Add attention if present
+            if has_attention:
+                st.info("Attention mechanism detected")
+                # Calculate attention input dimension
+                attention_dim = model.fc_input_size
+                model.attention = SimpleAttention(attention_dim)
+            
+        elif has_individual_layers:
+            st.info("Individual layer architecture detected")
+            model = CNN(input_length=input_length)
+        else:
+            # Try to adapt by key mapping
+            st.warning("Unknown architecture - attempting key mapping")
+            model = CNN(input_length=input_length)
+            state_dict = adapt_state_dict_keys(state_dict)
+        
+        # Load state dict with error handling
+        try:
+            model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as e:
+            # Try non-strict loading for partial compatibility
+            st.warning(f"Strict loading failed: {e}")
+            st.info("Attempting non-strict loading...")
+            model.load_state_dict(state_dict, strict=False)
+            
         model.eval()
         return model
+        
     except Exception as e:
         st.error(f"モデル読み込みエラー: {e}")
-        return None
+        # Try legacy loading as fallback
+        try:
+            st.info("Attempting legacy loading...")
+            model = CNN()
+            model.load_state_dict(torch.load(model_path, map_location='cpu'), strict=False)
+            model.eval()
+            return model
+        except Exception as e2:
+            st.error(f"Legacy loading also failed: {e2}")
+            return None
+
+def adapt_state_dict_keys(state_dict):
+    """Adapt state dict keys to match the expected model structure"""
+    adapted_dict = {}
+    
+    # Mapping from sequential to individual layer names
+    key_mapping = {
+        # CNN layers
+        'cnn.0.': 'conv1.',
+        'cnn.1.': 'bn1.',
+        'cnn.4.': 'conv2.',
+        'cnn.5.': 'bn2.',
+        'cnn.8.': 'conv3.',
+        'cnn.9.': 'bn3.',
+        # Classifier layers
+        'classifier.0.': 'fc1.',
+        'classifier.3.': 'fc2.',
+        'classifier.6.': 'fc3.',
+    }
+    
+    for old_key, value in state_dict.items():
+        new_key = old_key
+        
+        # Apply key mapping
+        for old_prefix, new_prefix in key_mapping.items():
+            if old_key.startswith(old_prefix):
+                new_key = old_key.replace(old_prefix, new_prefix)
+                break
+                
+        # Skip attention and other unknown keys for now
+        if not new_key.startswith('attention.'):
+            adapted_dict[new_key] = value
+            
+    return adapted_dict
 
 # Audio processor class for WebRTC
 class AudioProcessor(AudioProcessorBase):
-    def __init__(self, model: CNN, target_sr: int = 22050):
+    def __init__(self, model: nn.Module, target_sr: int = 22050):
         self.model = model
         self.target_sr = target_sr
         self.audio_buffer = []
