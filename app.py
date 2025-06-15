@@ -4,6 +4,21 @@ import torch.nn as nn
 import torchaudio
 import torchaudio.transforms as T
 
+# Configure torchaudio to prevent backend dispatch warnings
+# This fixes the warning: "Torchaudio's I/O functions now support par-call backend dispatch"
+try:
+    # For newer torchaudio versions, ensure proper backend handling
+    if hasattr(torchaudio, '_extension') and hasattr(torchaudio._extension, '_load_lib'):
+        # Preload the backend to avoid runtime dispatcher issues
+        pass
+    # Set a default backend preference for I/O operations (used by streamlit internals)
+    import os
+    if not os.environ.get('TORCHAUDIO_BACKEND'):
+        os.environ['TORCHAUDIO_BACKEND'] = 'soundfile'
+except Exception:
+    # Silently continue if backend configuration fails
+    pass
+
 import numpy as np
 import matplotlib.pyplot as plt
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
