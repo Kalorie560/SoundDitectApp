@@ -120,7 +120,7 @@ def load_model(model_path: str) -> CNN:
         model.eval()
         return model
     except Exception as e:
-        st.error(f"Error loading model: {e}")
+        st.error(f"モデル読み込みエラー: {e}")
         return None
 
 # Audio processor class for WebRTC
@@ -174,7 +174,7 @@ class AudioProcessor(AudioProcessorBase):
             self.chunk_audio_data.append(chunk.copy())
             
         except Exception as e:
-            st.error(f"Error processing audio chunk: {e}")
+            st.error(f"音声チャンク処理エラー: {e}")
     
     def get_results(self) -> Tuple[List[int], List[np.ndarray]]:
         """Get all classification results and audio data"""
@@ -192,7 +192,7 @@ class AudioProcessor(AudioProcessorBase):
 def plot_results(audio_chunks: List[np.ndarray], predictions: List[int]):
     """Plot audio waveform with colored background based on predictions"""
     if not audio_chunks or not predictions:
-        st.warning("No data to visualize")
+        st.warning("可視化するデータがありません")
         return
     
     # Concatenate all audio chunks
@@ -224,9 +224,9 @@ def plot_results(audio_chunks: List[np.ndarray], predictions: List[int]):
         ax.axvspan(start_time, end_time, alpha=alpha, color=color, label=label)
     
     # Formatting
-    ax.set_xlabel('Time (seconds)')
-    ax.set_ylabel('Amplitude')
-    ax.set_title('Audio Waveform with OK/NG Classification Results')
+    ax.set_xlabel('時間 (秒)')
+    ax.set_ylabel('振幅')
+    ax.set_title('OK/NG分類結果付き音声波形')
     ax.grid(True, alpha=0.3)
     
     # Add legend if we have both OK and NG results
@@ -239,20 +239,20 @@ def plot_results(audio_chunks: List[np.ndarray], predictions: List[int]):
 # Main Streamlit application
 def main():
     st.set_page_config(
-        page_title="Sound Detection App",
+        page_title="音声検出アプリ",
         page_icon="🎤",
         layout="wide"
     )
     
-    st.title("🎤 Real-time Audio Classification")
-    st.markdown("Record audio and get real-time OK/NG classification using a 1D CNN model")
+    st.title("🎤 リアルタイム音声分類")
+    st.markdown("音声を録音し、1D CNNモデルを使用してリアルタイムOK/NG分類を取得")
     
     # Model file upload
-    st.sidebar.header("Model Configuration")
+    st.sidebar.header("モデル設定")
     model_file = st.sidebar.file_uploader(
-        "Upload trained model (.pth file)",
+        "学習済みモデルをアップロード (.pthファイル)",
         type=['pth'],
-        help="Upload your trained PyTorch model file"
+        help="学習済みPyTorchモデルファイルをアップロード"
     )
     
     # Initialize session state
@@ -274,13 +274,13 @@ def main():
                 f.write(model_file.getbuffer())
             
             # Load model
-            with st.spinner("Loading model..."):
+            with st.spinner("モデル読み込み中..."):
                 model = load_model(temp_model_path)
                 if model is not None:
                     st.session_state.model = model
-                    st.success("Model loaded successfully!")
+                    st.success("モデルが正常に読み込まれました！")
                 else:
-                    st.error("Failed to load model")
+                    st.error("モデルの読み込みに失敗しました")
             
             # Clean up temp file
             import os
@@ -288,11 +288,11 @@ def main():
                 os.remove(temp_model_path)
                 
         except Exception as e:
-            st.error(f"Error loading model: {e}")
+            st.error(f"モデル読み込みエラー: {e}")
     
     # Audio recording section
     if st.session_state.model is not None:
-        st.header("🎙️ Audio Recording")
+        st.header("🎙️ 音声録音")
         
         # Create audio processor
         if st.session_state.audio_processor is None:
@@ -315,10 +315,10 @@ def main():
         
         # Recording status
         if webrtc_ctx.state.playing:
-            st.info("🔴 Recording... Speak into your microphone!")
+            st.info("🔴 録音中... マイクに向かって話してください！")
             st.session_state.recording_complete = False
         elif webrtc_ctx.state.signalling:
-            st.info("📡 Connecting...")
+            st.info("📡 接続中...")
         else:
             if not st.session_state.recording_complete and st.session_state.audio_processor is not None:
                 # Recording just stopped, get results
@@ -326,38 +326,38 @@ def main():
                 if predictions:
                     st.session_state.results = (predictions, audio_chunks)
                     st.session_state.recording_complete = True
-                    st.success(f"✅ Recording complete! Processed {len(predictions)} seconds of audio.")
+                    st.success(f"✅ 録音完了！{len(predictions)}秒の音声を処理しました。")
         
         # Results section
         if st.session_state.results is not None:
-            st.header("📊 Results")
+            st.header("📊 結果")
             predictions, audio_chunks = st.session_state.results
             
             if predictions:
                 # Summary statistics
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Total Duration", f"{len(predictions)} seconds")
+                    st.metric("総時間", f"{len(predictions)}秒")
                 with col2:
                     ok_count = predictions.count(0)
-                    st.metric("OK Segments", f"{ok_count}")
+                    st.metric("OKセグメント", f"{ok_count}")
                 with col3:
                     ng_count = predictions.count(1)
-                    st.metric("NG Segments", f"{ng_count}")
+                    st.metric("NGセグメント", f"{ng_count}")
                 
                 # Visualization
-                st.subheader("Audio Waveform with Classification")
-                with st.spinner("Generating visualization..."):
+                st.subheader("分類結果付き音声波形")
+                with st.spinner("可視化生成中..."):
                     plot_results(audio_chunks, predictions)
                 
                 # Detailed results
-                with st.expander("Detailed Results"):
+                with st.expander("詳細結果"):
                     for i, pred in enumerate(predictions):
                         status = "✅ OK" if pred == 0 else "❌ NG"
-                        st.write(f"Second {i+1}: {status}")
+                        st.write(f"{i+1}秒目: {status}")
         
         # Reset button
-        if st.button("🔄 Reset"):
+        if st.button("🔄 リセット"):
             if st.session_state.audio_processor is not None:
                 st.session_state.audio_processor.reset()
             st.session_state.recording_complete = False
@@ -365,15 +365,15 @@ def main():
             st.rerun()
     
     else:
-        st.warning("Please upload a trained model file (.pth) to start recording")
+        st.warning("録音を開始するには学習済みモデルファイル (.pth) をアップロードしてください")
         st.info("""
-        **Instructions:**
-        1. Upload your trained PyTorch model (.pth file) in the sidebar
-        2. Click 'Start' to begin recording
-        3. Speak into your microphone
-        4. Click 'Stop' to end recording and view results
+        **使用方法:**
+        1. サイドバーで学習済みPyTorchモデル (.pthファイル) をアップロード
+        2. '開始' をクリックして録音を開始
+        3. マイクに向かって話す
+        4. '停止' をクリックして録音を終了し、結果を表示
         
-        The app will classify each 1-second segment as OK (0) or NG (1) and visualize the results.
+        アプリは各1秒セグメントをOK (0) またはNG (1) として分類し、結果を可視化します。
         """)
 
 if __name__ == "__main__":
