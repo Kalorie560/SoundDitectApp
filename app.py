@@ -3,9 +3,18 @@ import torch
 import torch.nn as nn
 import torchaudio
 import torchaudio.transforms as T
+
+# Configure torchaudio backend to prevent deprecation warnings
+try:
+    # Try setting backend if the method exists (older versions)
+    if hasattr(torchaudio, 'set_audio_backend'):
+        torchaudio.set_audio_backend("soundfile")
+except Exception:
+    # For newer versions, backend is handled automatically
+    pass
 import numpy as np
 import matplotlib.pyplot as plt
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, ClientSettings, WebRtcMode
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
 import av
 import queue
 import threading
@@ -669,13 +678,11 @@ def main():
             key="audio-classification",
             mode=WebRtcMode.SENDONLY,
             audio_processor_factory=lambda: st.session_state.audio_processor,
-            client_settings=ClientSettings(
-                rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-                media_stream_constraints={
-                    "audio": True,
-                    "video": False,
-                },
-            ),
+            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+            media_stream_constraints={
+                "audio": True,
+                "video": False,
+            },
             async_processing=True,
         )
         
