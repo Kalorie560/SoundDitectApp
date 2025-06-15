@@ -116,7 +116,7 @@ def preprocess_audio(audio_data, target_sr=22050, target_length=22050, orig_sr=2
 
 # Alternative CNN Model Definition (for sequential architecture)
 class CNNSequential(nn.Module):
-    def __init__(self, input_length=22050, num_classes=2, channels=[32, 64, 128], kernel_sizes=[256, 128, 64]):
+    def __init__(self, input_length=22050, num_classes=2, channels=[32, 64, 128], kernel_sizes=[256, 128, 64], classifier_input_size=None):
         super(CNNSequential, self).__init__()
         
         # CNN layers in sequential format - dynamically sized
@@ -138,8 +138,11 @@ class CNNSequential(nn.Module):
         self.attention = None
         self.channels = channels
         
-        # Calculate FC input size
-        self._calculate_fc_input_size(input_length, channels, kernel_sizes)
+        # Use provided classifier input size or calculate it
+        if classifier_input_size is not None:
+            self.fc_input_size = classifier_input_size
+        else:
+            self._calculate_fc_input_size(input_length, channels, kernel_sizes)
         
         # Classifier in sequential format - dynamically sized
         fc_sizes = [512, 256] if self.fc_input_size > 1000 else [256, 128]
@@ -201,6 +204,7 @@ def extract_cnn_architecture(state_dict, arch_type):
     """Extract CNN architecture parameters from state dict"""
     channels = []
     kernel_sizes = []
+    classifier_input_size = None
     
     if arch_type == 'sequential':
         # Extract from cnn.X.weight keys
@@ -213,6 +217,10 @@ def extract_cnn_architecture(state_dict, arch_type):
                 out_channels, in_channels, kernel_size = weight.shape
                 channels.append(out_channels)
                 kernel_sizes.append(kernel_size)
+        
+        # Extract classifier input size from first classifier layer
+        if 'classifier.0.weight' in state_dict:
+            classifier_input_size = state_dict['classifier.0.weight'].shape[1]
     
     elif arch_type == 'individual':
         # Extract from conv1.weight, conv2.weight, etc.
@@ -223,13 +231,17 @@ def extract_cnn_architecture(state_dict, arch_type):
                 out_channels, in_channels, kernel_size = weight.shape
                 channels.append(out_channels)
                 kernel_sizes.append(kernel_size)
+        
+        # Extract classifier input size from first FC layer
+        if 'fc1.weight' in state_dict:
+            classifier_input_size = state_dict['fc1.weight'].shape[1]
     
     # Default fallback
     if not channels:
         channels = [32, 64, 128]
         kernel_sizes = [256, 128, 64]
         
-    return channels, kernel_sizes
+    return channels, kernel_sizes, classifier_input_size
 
 def extract_attention_dim(state_dict):
     """Extract attention dimension from state dict"""
@@ -237,7 +249,7 @@ def extract_attention_dim(state_dict):
         return state_dict['attention.query.weight'].shape[0]
     return 256  # default
 
-def create_adaptive_cnn(input_length, channels, kernel_sizes):
+def create_adaptive_cnn(input_length, channels, kernel_sizes, classifier_input_size=None):
     """Create adaptive CNN with individual layers"""
     class AdaptiveCNN(nn.Module):
         def __init__(self):
@@ -252,12 +264,16 @@ def create_adaptive_cnn(input_length, channels, kernel_sizes):
                 setattr(self, f'relu{i+1}', nn.ReLU())
                 setattr(self, f'pool{i+1}', nn.MaxPool1d(4, 4))
             
-            # Calculate FC size
-            x = input_length
-            for i, kernel_size in enumerate(kernel_sizes):
-                stride = 4 if i == 0 else 2
-                x = ((x - kernel_size) // stride + 1) // 4
-            fc_input_size = x * channels[-1]
+            # Use provided classifier input size or calculate it
+            if classifier_input_size is not None:
+                fc_input_size = classifier_input_size
+            else:
+                # Calculate FC size
+                x = input_length
+                for i, kernel_size in enumerate(kernel_sizes):
+                    stride = 4 if i == 0 else 2
+                    x = ((x - kernel_size) // stride + 1) // 4
+                fc_input_size = x * channels[-1]
             
             # FC layers
             fc_sizes = [512, 256] if fc_input_size > 1000 else [256, 128]
@@ -298,10 +314,12 @@ def load_model(model_path: str) -> nn.Module:
         # Extract architecture parameters from checkpoint
         if has_sequential_layers:
             st.info("Sequential architecture detected")
-            channels, kernel_sizes = extract_cnn_architecture(state_dict, 'sequential')
+            channels, kernel_sizes, classifier_input_size = extract_cnn_architecture(state_dict, 'sequential')
             st.info(f"Detected channels: {channels}, kernel sizes: {kernel_sizes}")
+            if classifier_input_size:
+                st.info(f"Detected classifier input size: {classifier_input_size}")
             
-            model = CNNSequential(input_length=input_length, channels=channels, kernel_sizes=kernel_sizes)
+            model = CNNSequential(input_length=input_length, channels=channels, kernel_sizes=kernel_sizes, classifier_input_size=classifier_input_size)
             
             # Add attention if present
             if has_attention:
@@ -312,8 +330,10 @@ def load_model(model_path: str) -> nn.Module:
         elif has_individual_layers:
             st.info("Individual layer architecture detected")
             # For individual layers, create adaptive CNN
-            channels, kernel_sizes = extract_cnn_architecture(state_dict, 'individual')
-            model = create_adaptive_cnn(input_length, channels, kernel_sizes)
+            channels, kernel_sizes, classifier_input_size = extract_cnn_architecture(state_dict, 'individual')
+            if classifier_input_size:
+                st.info(f"Detected classifier input size: {classifier_input_size}")
+            model = create_adaptive_cnn(input_length, channels, kernel_sizes, classifier_input_size)
         else:
             # Try to adapt by key mapping
             st.warning("Unknown architecture - attempting key mapping")
