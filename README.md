@@ -63,12 +63,17 @@ streamlit run app.py
    - Attentionメカニズムを含むモデル（`attention.query`, `attention.key`, etc.）
    - より高度な特徴抽出
 
-### 柔軟なモデル読み込み
+### 動的モデル読み込み機能 🆕
 
-- **自動アーキテクチャ検出**: モデルファイルのキーを分析して適切なアーキテクチャを自動選択
-- **キーマッピング**: 異なる命名規則のモデル間での自動変換
-- **部分読み込み**: 一部のレイヤーが不一致でも可能な限り読み込み
-- **フォールバック機能**: 複数の読み込み戦略を順次試行
+- **自動アーキテクチャ適応**: チェックポイントの重みサイズを解析して動的にモデルを構築
+- **柔軟なチャンネル数**: 32→64→128 や 64→128→256 など異なるチャンnel構成に自動対応
+- **可変カーネルサイズ**: kernel_size=3, 128, 256など様々なサイズに対応
+- **プログレッシブ読み込み**: 
+  1. 厳密読み込み (strict=True)
+  2. 部分読み込み (strict=False) 
+  3. キーマッピング変換
+  4. レガシー読み込み
+- **詳細ログ**: 読み込み過程での詳細な情報表示
 
 ## 音声処理
 
@@ -99,21 +104,29 @@ streamlit run app.py
 
 ### モデル読み込みエラー
 
-**問題**: `Missing key(s) in state_dict` または `Unexpected key(s) in state_dict` エラー
+**問題**: `Missing key(s) in state_dict`、`Unexpected key(s) in state_dict`、または`size mismatch`エラー
 
-**解決方法**: 
-1. アプリケーションは自動的に異なるアーキテクチャを検出し適応します
-2. エラーが発生した場合、アプリは以下の順序で読み込みを試行します：
-   - 厳密な読み込み (strict=True)
-   - 部分読み込み (strict=False) 
-   - キーマッピングによる変換
-   - レガシー読み込み
+**✅ 自動解決機能**: 
+アプリケーションは2025年6月更新で以下の問題を自動的に解決します：
+
+1. **動的アーキテクチャ適応** 🔧
+   - チェックポイントの重みを解析して適切なモデル構造を自動構築
+   - 異なるチャンネル数（32→64→128 vs 64→128→256）に対応
+   - 異なるカーネルサイズ（3 vs 256）に対応
+
+2. **プログレッシブ読み込み** 📚
+   - 厳密読み込み (strict=True) → 部分読み込み (strict=False) → キーマッピング → レガシー読み込み
+
+3. **Streamlit WebRTC API修正** 🔧
+   - `ClientSettings.MediaStreamConstraints.Mode.SENDONLY` → `WebRtcMode.SENDONLY`
 
 **対応状況の確認**: モデル読み込み時にStreamlitアプリで以下のメッセージを確認：
 - "Sequential architecture detected" - Sequential形式のモデル
-- "Individual layer architecture detected" - 個別レイヤー形式のモデル
+- "Individual layer architecture detected" - 個別レイヤー形式のモデル  
 - "Attention mechanism detected" - Attention付きモデル
-- "Unknown architecture - attempting key mapping" - 自動変換を試行
+- "Detected channels: [64, 128, 256], kernel sizes: [3, 3, 3]" - 検出されたアーキテクチャ
+- "Model loaded successfully with strict loading" - 成功
+- "Non-strict loading completed" - 一部パラメータが初期化される可能性
 
 ### 音声品質の改善
 
