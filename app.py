@@ -1,23 +1,42 @@
-import streamlit as st
-import torch
-import torch.nn as nn
-import torchaudio
-import torchaudio.transforms as T
+# Critical: Configure torchaudio BEFORE importing streamlit to prevent segmentation fault
+# This must be done first to avoid streamlit's file watcher torchaudio conflicts
+import os
+import sys
 
-# Configure torchaudio to prevent backend dispatch warnings
-# This fixes the warning: "Torchaudio's I/O functions now support par-call backend dispatch"
+# Force torchaudio backend configuration before any imports
+os.environ['TORCHAUDIO_BACKEND'] = 'soundfile'
+
+# Disable torchaudio backend warnings entirely
+os.environ['TORCHAUDIO_DISABLE_SOX_WARNINGS'] = '1'
+
+# Import and configure torchaudio first
+import torchaudio
+import torch
+
+# Force backend initialization to prevent runtime dispatcher issues
 try:
-    # For newer torchaudio versions, ensure proper backend handling
-    if hasattr(torchaudio, '_extension') and hasattr(torchaudio._extension, '_load_lib'):
-        # Preload the backend to avoid runtime dispatcher issues
+    # Try to set the backend explicitly before streamlit imports torchaudio
+    if hasattr(torchaudio, 'set_audio_backend'):
+        # For older versions that still support set_audio_backend
         pass
-    # Set a default backend preference for I/O operations (used by streamlit internals)
-    import os
-    if not os.environ.get('TORCHAUDIO_BACKEND'):
-        os.environ['TORCHAUDIO_BACKEND'] = 'soundfile'
-except Exception:
-    # Silently continue if backend configuration fails
-    pass
+    elif hasattr(torchaudio, '_extension'):
+        # For newer versions, ensure extension is loaded properly
+        torchaudio._extension._init_extension()
+    
+    # Force a minimal torchaudio operation to initialize backend properly
+    dummy_tensor = torch.zeros(1, 1000)
+    resampler = torchaudio.transforms.Resample(16000, 22050)
+    _ = resampler(dummy_tensor)
+    del dummy_tensor, resampler
+    
+except Exception as e:
+    # If backend configuration fails, continue but print the error
+    print(f"Warning: Torchaudio backend configuration failed: {e}")
+
+# Now import streamlit (after torchaudio is properly configured)
+import streamlit as st
+import torch.nn as nn
+import torchaudio.transforms as T
 
 import numpy as np
 import matplotlib.pyplot as plt
