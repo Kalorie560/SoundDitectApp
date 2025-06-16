@@ -33,54 +33,152 @@ logger = logging.getLogger(__name__)
 # デフォルト設定
 DEFAULT_CONFIG = {
     'audio': {'sample_rate': 44100},
-    'model': {'input_length': 44100, 'num_classes': 2}
+    'model': {
+        'input_length': 44100, 
+        'num_classes': 2,
+        'cnn_layers': [
+            {'filters': 64, 'kernel_size': 3, 'stride': 1, 'padding': 1},
+            {'filters': 128, 'kernel_size': 3, 'stride': 2, 'padding': 1},
+            {'filters': 256, 'kernel_size': 3, 'stride': 2, 'padding': 1}
+        ],
+        'attention': {
+            'hidden_dim': 256,
+            'num_heads': 8
+        },
+        'fully_connected': [
+            {'units': 512, 'dropout': 0.3},
+            {'units': 256, 'dropout': 0.3}
+        ]
+    }
 }
 
-# 音声異常検知モデル（参考フォルダから簡略化）
-class SimpleAnomalyDetector(nn.Module):
-    def __init__(self, input_length=44100, num_classes=2):
-        super().__init__()
+# Multi-head attention layer for audio feature processing
+class AttentionLayer(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, num_heads: int):
+        super(AttentionLayer, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
         
-        # 1D CNN layers
-        self.conv1 = nn.Conv1d(1, 32, kernel_size=256, stride=4)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=128, stride=2)
-        self.conv3 = nn.Conv1d(64, 128, kernel_size=64, stride=2)
+        self.query = nn.Linear(input_dim, hidden_dim)
+        self.key = nn.Linear(input_dim, hidden_dim)
+        self.value = nn.Linear(input_dim, hidden_dim)
+        self.output = nn.Linear(hidden_dim, hidden_dim)
+        self.dropout = nn.Dropout(0.1)
         
-        self.pool = nn.MaxPool1d(4)
-        self.dropout = nn.Dropout(0.5)
+    def forward(self, x):
+        batch_size, seq_len, input_dim = x.size()
         
-        # FC layers
-        self.fc1 = nn.Linear(self._get_conv_output_size(input_length), 256)
-        self.fc2 = nn.Linear(256, num_classes)
+        # Compute queries, keys, values
+        Q = self.query(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.key(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.value(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
-    def _get_conv_output_size(self, input_length):
-        # 畳み込み層の出力サイズを計算
+        # Compute attention scores
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
+        attention_weights = torch.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        # Apply attention to values
+        attended = torch.matmul(attention_weights, V)
+        attended = attended.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, self.hidden_dim
+        )
+        
+        output = self.output(attended)
+        return output
+
+# 音声異常検知モデル（1D-CNN + Attention機構）
+class SoundAnomalyDetector(nn.Module):
+    def __init__(self, config: dict):
+        super(SoundAnomalyDetector, self).__init__()
+        self.config = config
+        
+        # CNN layers
+        cnn_layers = []
+        input_channels = 1
+        
+        for layer_config in config['model']['cnn_layers']:
+            cnn_layers.extend([
+                nn.Conv1d(
+                    input_channels, 
+                    layer_config['filters'],
+                    kernel_size=layer_config['kernel_size'],
+                    stride=layer_config['stride'],
+                    padding=layer_config['padding']
+                ),
+                nn.BatchNorm1d(layer_config['filters']),
+                nn.ReLU(),
+                nn.MaxPool1d(2)
+            ])
+            input_channels = layer_config['filters']
+        
+        self.cnn = nn.Sequential(*cnn_layers)
+        
+        # Calculate CNN output size
+        self.cnn_output_size = self._get_cnn_output_size(config['model']['input_length'])
+        
+        # Attention layer
+        attention_config = config['model']['attention']
+        self.attention = AttentionLayer(
+            input_channels,
+            attention_config['hidden_dim'],
+            attention_config['num_heads']
+        )
+        
+        # Fully connected layers
+        fc_layers = []
+        fc_input_size = attention_config['hidden_dim']
+        
+        for fc_config in config['model']['fully_connected']:
+            fc_layers.extend([
+                nn.Linear(fc_input_size, fc_config['units']),
+                nn.ReLU(),
+                nn.Dropout(fc_config['dropout'])
+            ])
+            fc_input_size = fc_config['units']
+        
+        # Output layer
+        fc_layers.append(nn.Linear(fc_input_size, config['model']['num_classes']))
+        self.classifier = nn.Sequential(*fc_layers)
+        
+        # Global average pooling
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+    
+    def _get_cnn_output_size(self, input_length: int) -> int:
+        # Create dummy input to calculate output size
         x = torch.randn(1, 1, input_length)
-        x = self.pool(torch.relu(self.conv1(x)))
-        x = self.pool(torch.relu(self.conv2(x)))
-        x = self.pool(torch.relu(self.conv3(x)))
-        return x.view(1, -1).size(1)
+        with torch.no_grad():
+            x = self.cnn(x)
+        return x.size(-1)
     
     def forward(self, x):
-        # 入力は (batch_size, input_length)
-        x = x.unsqueeze(1)  # (batch_size, 1, input_length)
+        # Input shape: (batch_size, input_length)
+        # Add channel dimension: (batch_size, 1, input_length)
+        x = x.unsqueeze(1)
         
-        x = self.pool(torch.relu(self.conv1(x)))
-        x = self.pool(torch.relu(self.conv2(x)))
-        x = self.pool(torch.relu(self.conv3(x)))
+        # CNN feature extraction
+        x = self.cnn(x)  # (batch_size, channels, reduced_length)
         
-        x = x.view(x.size(0), -1)
-        x = self.dropout(torch.relu(self.fc1(x)))
-        x = self.fc2(x)
+        # Prepare for attention: (batch_size, seq_len, features)
+        x = x.transpose(1, 2)
         
-        return x
+        # Apply attention
+        x = self.attention(x)
+        
+        # Global average pooling
+        x = x.transpose(1, 2)  # Back to (batch_size, features, seq_len)
+        x = self.global_avg_pool(x).squeeze(-1)  # (batch_size, features)
+        
+        # Classification
+        output = self.classifier(x)
+        
+        return output
 
 # モデル読み込み（アップロードされたファイルまたはデフォルト）
 def load_model(model_file=None):
-    model = SimpleAnomalyDetector(
-        input_length=DEFAULT_CONFIG['model']['input_length'],
-        num_classes=DEFAULT_CONFIG['model']['num_classes']
-    )
+    config = DEFAULT_CONFIG
+    model = SoundAnomalyDetector(config)
     
     if model_file is not None:
         try:
@@ -94,21 +192,57 @@ def load_model(model_file=None):
             st.error(f"モデル読み込みに失敗しました: {e}")
             st.info("ベースラインモデルを使用します")
     else:
-        # デフォルトモデルパスをチェック
+        # referenceフォルダのbest_model.pthをチェック
+        reference_model_path = Path('reference/best_model.pth')
         default_model_path = Path('models/best_model.pth')
-        if default_model_path.exists():
+        
+        model_loaded = False
+        
+        # まずreferenceフォルダを試す
+        if reference_model_path.exists():
             try:
-                model.load_state_dict(torch.load(default_model_path, map_location='cpu'))
-                logger.info("デフォルト訓練済みモデルを読み込みました")
-                st.info("📁 デフォルトモデルを使用中")
+                state_dict = torch.load(reference_model_path, map_location='cpu')
+                model.load_state_dict(state_dict)
+                logger.info("reference フォルダの訓練済みモデルを読み込みました")
+                st.success("✅ referenceフォルダのモデルを読み込みました")
+                model_loaded = True
+            except Exception as e:
+                logger.warning(f"referenceモデル読み込み失敗: {e}")
+        
+        # 次にmodelsフォルダを試す
+        if not model_loaded and default_model_path.exists():
+            try:
+                state_dict = torch.load(default_model_path, map_location='cpu')
+                model.load_state_dict(state_dict)
+                logger.info("models フォルダの訓練済みモデルを読み込みました")
+                st.info("📁 modelsフォルダのモデルを使用中")
+                model_loaded = True
             except Exception as e:
                 logger.warning(f"デフォルトモデル読み込み失敗: {e}")
-                st.info("ベースラインモデルを使用します")
-        else:
-            st.info("ベースラインモデルを使用します")
+        
+        if not model_loaded:
+            # ベースラインモデルの初期化
+            logger.info("ベースラインモデルを初期化します")
+            st.info("🤖 ベースラインモデルを使用します")
+            _initialize_baseline_model(model)
     
     model.eval()
     return model
+
+# ベースラインモデルの初期化
+def _initialize_baseline_model(model):
+    try:
+        for name, param in model.named_parameters():
+            if 'weight' in name:
+                if len(param.shape) > 1:
+                    torch.nn.init.xavier_uniform_(param)
+                else:
+                    torch.nn.init.uniform_(param, -0.1, 0.1)
+            elif 'bias' in name:
+                torch.nn.init.constant_(param, 0)
+        logger.info("ベースラインモデルの重みを初期化しました")
+    except Exception as e:
+        logger.warning(f"ベースライン初期化失敗: {e}")
 
 # 音声前処理
 def preprocess_audio(audio_data, sample_rate=44100):
@@ -265,53 +399,101 @@ def main():
         )
         
         if webrtc_ctx.audio_receiver:
-            # 録音状態の管理
-            if st.button("🎙️ 録音開始", type="primary"):
-                st.session_state.recording = True
-                st.session_state.audio_buffer = []
-                
-            if st.button("⏹️ 録音停止", type="secondary"):
+            # 録音状態の初期化
+            if 'recording' not in st.session_state:
                 st.session_state.recording = False
+            if 'audio_buffer' not in st.session_state:
+                st.session_state.audio_buffer = []
+            
+            # 録音制御ボタン
+            col_rec1, col_rec2 = st.columns(2)
+            with col_rec1:
+                if st.button("🎙️ 録音開始", type="primary", disabled=st.session_state.recording):
+                    st.session_state.recording = True
+                    st.session_state.audio_buffer = []
+                    st.success("録音を開始しました！")
+                    st.rerun()
+                    
+            with col_rec2:
+                if st.button("⏹️ 録音停止", type="secondary", disabled=not st.session_state.recording):
+                    st.session_state.recording = False
+                    st.info("録音を停止しました")
+                    st.rerun()
+            
+            # 録音状態の表示
+            if st.session_state.recording:
+                st.warning("🔴 録音中... 停止ボタンを押してください")
+            elif st.session_state.audio_buffer:
+                buffer_duration = len(np.concatenate(st.session_state.audio_buffer)) / sample_rate if st.session_state.audio_buffer else 0
+                st.info(f"📊 録音済み: {buffer_duration:.1f}秒")
                 
             # 録音中の音声データ処理
             if webrtc_ctx.audio_receiver and st.session_state.get('recording', False):
                 try:
-                    audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1)
-                    for audio_frame in audio_frames:
-                        sound = audio_frame.to_ndarray()
-                        if 'audio_buffer' not in st.session_state:
-                            st.session_state.audio_buffer = []
-                        st.session_state.audio_buffer.append(sound.flatten())
-                        
+                    audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=0.1)
+                    if audio_frames:
+                        for audio_frame in audio_frames:
+                            sound = audio_frame.to_ndarray()
+                            # ステレオの場合はモノラルに変換
+                            if len(sound.shape) > 1 and sound.shape[1] > 1:
+                                sound = np.mean(sound, axis=1)
+                            st.session_state.audio_buffer.append(sound.flatten())
+                            
                 except Exception as e:
                     logger.warning(f"音声フレーム処理エラー: {e}")
+                    # 録音エラーの場合は録音を停止
+                    if "timeout" not in str(e).lower():
+                        st.session_state.recording = False
+                        st.error(f"録音エラーが発生しました: {e}")
         
         # 録音データ処理
-        if st.button("🔍 音声分析", disabled=not st.session_state.get('audio_buffer')):
+        audio_buffer_available = bool(st.session_state.get('audio_buffer'))
+        analysis_disabled = not audio_buffer_available or st.session_state.get('recording', False)
+        
+        if st.button("🔍 音声分析", disabled=analysis_disabled):
             if st.session_state.get('audio_buffer'):
-                # 音声データを結合
-                audio_data = np.concatenate(st.session_state.audio_buffer)
-                
-                if len(audio_data) > sample_rate:  # 最低1秒必要
-                    st.success("✅ 録音完了！")
+                try:
+                    # 音声データを結合
+                    audio_data = np.concatenate(st.session_state.audio_buffer)
                     
-                    # 音声分析
-                    with st.spinner("音声を分析中..."):
-                        segments, predictions, confidences = analyze_audio(
-                            audio_data, st.session_state.model, sample_rate
-                        )
-                    
-                    # 結果をセッションに保存
-                    st.session_state.audio_data = audio_data
-                    st.session_state.predictions = predictions
-                    st.session_state.confidences = confidences
-                    st.session_state.sample_rate = sample_rate
-                else:
-                    st.error("録音時間が短すぎます。最低1秒以上録音してください。")
+                    if len(audio_data) > sample_rate:  # 最低1秒必要
+                        st.success("✅ 録音データを確認しました！")
+                        
+                        # 音声分析
+                        with st.spinner("音声を分析中..."):
+                            segments, predictions, confidences = analyze_audio(
+                                audio_data, st.session_state.model, sample_rate
+                            )
+                        
+                        # 結果をセッションに保存
+                        st.session_state.audio_data = audio_data
+                        st.session_state.predictions = predictions
+                        st.session_state.confidences = confidences
+                        st.session_state.sample_rate = sample_rate
+                        st.success("🎯 音声分析が完了しました！")
+                    else:
+                        st.error("録音時間が短すぎます。最低1秒以上録音してください。")
+                        
+                except Exception as e:
+                    logger.error(f"音声分析エラー: {e}")
+                    st.error(f"音声分析中にエラーが発生しました: {e}")
             else:
                 st.error("録音データがありません。先に録音してください。")
     
     with col2:
+        st.markdown("### 📊 録音状況")
+        
+        if st.session_state.get('audio_buffer'):
+            try:
+                buffer_data = np.concatenate(st.session_state.audio_buffer)
+                duration = len(buffer_data) / sample_rate
+                st.metric("録音時間", f"{duration:.1f}秒")
+                st.metric("データサイズ", f"{len(buffer_data):,} サンプル")
+            except:
+                st.metric("録音時間", "計算中...")
+        else:
+            st.metric("録音時間", "0.0秒")
+            
         if st.button("🔄 リセット"):
             # セッションをクリア
             for key in ['audio_data', 'predictions', 'confidences', 'audio_buffer', 'recording']:
