@@ -1,3 +1,14 @@
+# 警告を最初に抑制（importの前に実行）
+import warnings
+import os
+warnings.filterwarnings("ignore")
+# torch.classes警告を抑制（Streamlit互換性問題）
+warnings.filterwarnings("ignore", ".*torch._classes.*")
+warnings.filterwarnings("ignore", ".*torch.*")
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+os.environ['PYTHONWARNINGS'] = 'ignore'
+
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,14 +23,8 @@ import yaml
 import time
 import logging
 from typing import Tuple, Optional
-import warnings
 import io
 import tempfile
-
-# 警告を抑制
-warnings.filterwarnings("ignore")
-# torch.classes警告を抑制（Streamlit互換性問題）
-warnings.filterwarnings("ignore", ".*torch._classes.*")
 
 # Streamlitページ設定
 st.set_page_config(
@@ -356,17 +361,59 @@ def plot_results(audio_data, predictions, sample_rate=44100):
     plt.tight_layout()
     return fig
 
-# WebRTC音声録音コールバック
+# WebRTC音声録音コールバック（改善版）
 class AudioProcessor:
     def __init__(self):
         self.audio_frames = []
         self.recording = False
+        self._buffer = []
         
     def recv(self, frame):
-        if self.recording:
-            sound = frame.to_ndarray()
-            self.audio_frames.append(sound)
+        """WebRTCフレーム受信コールバック"""
+        try:
+            if self.recording:
+                sound = frame.to_ndarray()
+                
+                # ステレオからモノラルに変換
+                if len(sound.shape) > 1 and sound.shape[1] > 1:
+                    sound = np.mean(sound, axis=1)
+                elif len(sound.shape) > 1:
+                    sound = sound.flatten()
+                
+                # データ型変換
+                if sound.dtype != np.float32:
+                    sound = sound.astype(np.float32)
+                
+                # 振幅クリッピング
+                sound = np.clip(sound, -1.0, 1.0)
+                
+                if len(sound) > 0:
+                    self._buffer.append(sound)
+                    logger.debug(f"Audio frame buffered: {len(sound)} samples")
+            
+        except Exception as e:
+            logger.warning(f"AudioProcessor.recv error: {e}")
+        
         return frame
+    
+    def get_buffered_audio(self):
+        """バッファされた音声データを取得"""
+        if self._buffer:
+            result = np.concatenate(self._buffer)
+            self._buffer = []  # バッファクリア
+            return result
+        return None
+    
+    def start_recording(self):
+        """録音開始"""
+        self.recording = True
+        self._buffer = []
+        logger.info("AudioProcessor: 録音開始")
+    
+    def stop_recording(self):
+        """録音停止"""
+        self.recording = False
+        logger.info("AudioProcessor: 録音停止")
 
 # メイン処理
 def main():
@@ -404,13 +451,15 @@ def main():
     with col1:
         st.markdown("**下のマイクボタンを押して録音を開始してください**")
         
-        # WebRTC音声ストリーミング
-        audio_processor = AudioProcessor()
+        # WebRTC音声ストリーミング（セッション管理）
+        if 'audio_processor' not in st.session_state:
+            st.session_state.audio_processor = AudioProcessor()
+        audio_processor = st.session_state.audio_processor
         
         webrtc_ctx = webrtc_streamer(
             key="audio-recorder",
             mode=WebRtcMode.SENDONLY,
-            audio_receiver_size=1024,
+            audio_receiver_size=8192,  # 大幅に増加（1024→8192）
             rtc_configuration=RTC_CONFIGURATION,
             media_stream_constraints={
                 "video": False,
@@ -423,6 +472,8 @@ def main():
                 }
             },
             audio_html_attrs={"autoPlay": True, "controls": False, "muted": False},
+            # コールバック関数を設定
+            audio_frame_callback=audio_processor.recv,
         )
         
         if webrtc_ctx.audio_receiver:
@@ -438,12 +489,21 @@ def main():
                 if st.button("🎙️ 録音開始", type="primary", disabled=st.session_state.recording):
                     st.session_state.recording = True
                     st.session_state.audio_buffer = []
+                    audio_processor.start_recording()  # AudioProcessorに通知
                     st.success("録音を開始しました！")
                     st.rerun()
                     
             with col_rec2:
                 if st.button("⏹️ 録音停止", type="secondary", disabled=not st.session_state.recording):
                     st.session_state.recording = False
+                    audio_processor.stop_recording()  # AudioProcessorに通知
+                    
+                    # AudioProcessorからバッファデータを取得
+                    buffered_audio = audio_processor.get_buffered_audio()
+                    if buffered_audio is not None:
+                        st.session_state.audio_buffer.append(buffered_audio)
+                        logger.info(f"録音停止: {len(buffered_audio)} サンプル取得")
+                    
                     st.info("録音を停止しました")
                     st.rerun()
             
@@ -463,17 +523,17 @@ def main():
                     logger.warning(f"Duration calculation error: {e}")
                     st.info("📊 録音済み: 計算中...")
                 
-            # 録音中の音声データ処理
+            # 録音中の音声データ処理（フォールバック機構）
             if webrtc_ctx.audio_receiver and st.session_state.get('recording', False):
                 try:
-                    # より長いタイムアウトで安定したフレーム取得
-                    audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1.0)
+                    # フォールバック: WebRTCレシーバーから直接フレーム取得
+                    audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=0.5)
                     if audio_frames:
                         for audio_frame in audio_frames:
                             sound = audio_frame.to_ndarray()
                             
                             # デバッグ情報をログ出力
-                            logger.debug(f"Audio frame shape: {sound.shape}, dtype: {sound.dtype}")
+                            logger.debug(f"Fallback audio frame shape: {sound.shape}, dtype: {sound.dtype}")
                             
                             # 複数チャンネルの場合はモノラルに変換
                             if len(sound.shape) > 1:
@@ -489,16 +549,22 @@ def main():
                             # 振幅をクリップして異常値を防ぐ
                             sound = np.clip(sound, -1.0, 1.0)
                             
-                            # セッションバッファに追加
+                            # セッションバッファに追加（フォールバック）
                             if len(sound) > 0:
                                 st.session_state.audio_buffer.append(sound)
-                                logger.debug(f"Audio chunk added: {len(sound)} samples")
+                                logger.debug(f"Fallback audio chunk added: {len(sound)} samples")
                             
                 except Exception as e:
                     error_msg = str(e).lower()
                     if "timeout" in error_msg:
                         # タイムアウトは正常（データがない時）
                         logger.debug("Audio frame timeout (normal)")
+                        
+                        # AudioProcessorからもデータを取得を試行
+                        buffered_audio = audio_processor.get_buffered_audio()
+                        if buffered_audio is not None:
+                            st.session_state.audio_buffer.append(buffered_audio)
+                            logger.debug(f"AudioProcessor fallback: {len(buffered_audio)} samples")
                     else:
                         logger.warning(f"音声フレーム処理エラー: {e}")
                         # 重大なエラーの場合のみ録音を停止
