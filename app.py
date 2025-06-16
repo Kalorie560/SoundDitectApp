@@ -25,8 +25,20 @@ import tempfile
 import threading
 from datetime import datetime
 
-# Simple recorderモジュールをインポート
-from simple_recorder import SimpleAudioRecorder
+# Simple recorderモジュールをインポート（エラーハンドリング付き）
+try:
+    from simple_recorder import SimpleAudioRecorder
+    RECORDER_AVAILABLE = True
+    RECORDER_ERROR = None
+except ImportError as e:
+    # sounddeviceが利用できない場合のフォールバック
+    from simple_recorder_fallback import FallbackAudioRecorder as SimpleAudioRecorder
+    RECORDER_AVAILABLE = False
+    RECORDER_ERROR = str(e)
+except Exception as e:
+    from simple_recorder_fallback import FallbackAudioRecorder as SimpleAudioRecorder
+    RECORDER_AVAILABLE = False
+    RECORDER_ERROR = str(e)
 
 # Streamlitページ設定
 st.set_page_config(
@@ -445,6 +457,51 @@ def main():
     with col1:
         st.markdown("**Simple Recorderを使用したWAV録音機能**")
         
+        # 録音機能の利用可否を表示
+        if not RECORDER_AVAILABLE:
+            st.warning("⚠️ 録音機能が利用できません")
+            st.info(f"**エラー詳細**: {RECORDER_ERROR}")
+            
+            # システム依存関係の解決方法を表示
+            with st.expander("🔧 録音機能を有効にする方法", expanded=True):
+                st.markdown("""
+                録音機能を有効にするには、以下の手順を実行してください：
+                
+                **1. システム依存関係のインストール**
+                ```bash
+                # インストールスクリプトを実行
+                python install_dependencies.py
+                ```
+                
+                **2. 手動インストール（上記が失敗した場合）**
+                
+                **Google Colab環境の場合:**
+                ```bash
+                !apt-get update -qq
+                !apt-get install -y portaudio19-dev python3-pyaudio alsa-utils
+                !pip install sounddevice>=0.4.0
+                ```
+                
+                **Linux環境の場合:**
+                ```bash
+                sudo apt-get update
+                sudo apt-get install -y portaudio19-dev python3-pyaudio alsa-utils
+                pip install sounddevice>=0.4.0
+                ```
+                
+                **3. 代替手段**
+                現在は**WAVファイルアップロード機能**をご利用ください（下記参照）
+                """)
+            
+            # ファイルアップロードボタンを強調表示
+            st.markdown("---")
+            st.markdown("### 📂 代替手段: WAVファイルをアップロード")
+            if st.button("📤 WAVファイルアップロード機能に移動", use_container_width=True):
+                st.rerun()
+            st.markdown("---")
+        else:
+            st.success("✅ 録音機能が利用可能です")
+        
         # 録音制御
         if 'recorder' not in st.session_state:
             st.session_state.recorder = SimpleAudioRecorder(sample_rate=sample_rate)
@@ -652,11 +709,16 @@ def main():
         st.info("recordingsフォルダが見つかりません")
     
     # 音声ファイルアップロード機能
-    st.header("📤 音声ファイルアップロード")
+    if not RECORDER_AVAILABLE:
+        st.header("📤 音声ファイルアップロード（メイン機能）")
+        st.info("🎤 録音機能が利用できないため、WAVファイルアップロード機能をメインとしてご利用ください")
+    else:
+        st.header("📤 音声ファイルアップロード")
+    
     uploaded_audio = st.file_uploader(
         "外部音声ファイルをアップロード", 
         type=['wav', 'mp3', 'flac', 'm4a'],
-        help="外部の音声ファイルをアップロードして分析できます"
+        help="外部の音声ファイルをアップロードして分析できます。録音機能が利用できない環境では、この機能をメインとしてご利用ください。"
     )
     
     if uploaded_audio:
