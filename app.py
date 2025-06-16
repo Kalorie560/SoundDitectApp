@@ -32,14 +32,14 @@ st.set_page_config(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# デフォルト設定
+# デフォルト設定（reference/config.yamlに合わせた構造）
 DEFAULT_CONFIG = {
     'audio': {'sample_rate': 44100},
     'model': {
         'input_length': 44100, 
         'num_classes': 2,
         'cnn_layers': [
-            {'filters': 64, 'kernel_size': 3, 'stride': 1, 'padding': 1},
+            {'filters': 64, 'kernel_size': 3, 'stride': 1, 'padding': 'same'},
             {'filters': 128, 'kernel_size': 3, 'stride': 2, 'padding': 1},
             {'filters': 256, 'kernel_size': 3, 'stride': 2, 'padding': 1}
         ],
@@ -101,13 +101,19 @@ class SoundAnomalyDetector(nn.Module):
         input_channels = 1
         
         for layer_config in config['model']['cnn_layers']:
+            # Handle "same" padding by calculating appropriate padding
+            padding = layer_config['padding']
+            if padding == 'same':
+                # For "same" padding in PyTorch, use kernel_size//2
+                padding = layer_config['kernel_size'] // 2
+            
             cnn_layers.extend([
                 nn.Conv1d(
                     input_channels, 
                     layer_config['filters'],
                     kernel_size=layer_config['kernel_size'],
                     stride=layer_config['stride'],
-                    padding=layer_config['padding']
+                    padding=padding
                 ),
                 nn.BatchNorm1d(layer_config['filters']),
                 nn.ReLU(),
@@ -177,9 +183,28 @@ class SoundAnomalyDetector(nn.Module):
         
         return output
 
+# 設定ファイル読み込み
+def load_config():
+    """reference/config.yamlがあれば読み込み、なければデフォルト設定を使用"""
+    config_path = Path('reference/config.yaml')
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                yaml_config = yaml.safe_load(f)
+            logger.info("✅ reference/config.yamlを読み込みました")
+            return yaml_config
+        except Exception as e:
+            logger.warning(f"設定ファイル読み込みエラー: {e}")
+            logger.info("デフォルト設定を使用します")
+    else:
+        logger.info("reference/config.yamlが見つかりません。デフォルト設定を使用します")
+    
+    return DEFAULT_CONFIG
+
 # モデル読み込み（アップロードされたファイルまたはデフォルト）
 def load_model(model_file=None):
-    config = DEFAULT_CONFIG
+    # 設定を読み込み（reference/config.yamlがあれば優先使用）
+    config = load_config()
     model = SoundAnomalyDetector(config)
     
     if model_file is not None:
