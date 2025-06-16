@@ -5,9 +5,12 @@ warnings.filterwarnings("ignore")
 # torch.classes警告を抑制（Streamlit互換性問題）
 warnings.filterwarnings("ignore", ".*torch._classes.*")
 warnings.filterwarnings("ignore", ".*torch.*")
+warnings.filterwarnings("ignore", ".*Examining the path of torch.classes.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 os.environ['PYTHONWARNINGS'] = 'ignore'
+# PyTorch classes警告を完全に抑制
+os.environ['PYTHONHASHSEED'] = 'ignore'
 
 import streamlit as st
 import numpy as np
@@ -336,8 +339,8 @@ def analyze_audio(audio_data, model, sample_rate=44100):
     
     return segments, predictions, confidences
 
-# 結果プロット
-def plot_results(audio_data, predictions, sample_rate=44100):
+# 結果プロット（信頼度付き）
+def plot_results(audio_data, predictions, sample_rate=44100, confidences=None):
     fig, ax = plt.subplots(figsize=(15, 6))
     
     # 時間軸
@@ -353,23 +356,38 @@ def plot_results(audio_data, predictions, sample_rate=44100):
         color = 'lightgreen' if pred == 0 else 'lightcoral'
         label = 'OK' if pred == 0 else 'NG'
         
-        ax.axvspan(start_time, end_time, alpha=0.3, color=color)
+        # 信頼度に応じてアルファ値を調整
+        if confidences and i < len(confidences):
+            alpha = 0.2 + (confidences[i] * 0.4)  # 0.2-0.6の範囲
+            confidence_text = f" ({confidences[i]:.2f})"
+        else:
+            alpha = 0.3
+            confidence_text = ""
         
-        # 中央にラベル表示
+        ax.axvspan(start_time, end_time, alpha=alpha, color=color)
+        
+        # 中央にラベル表示（信頼度付き）
         mid_time = start_time + 0.5
-        ax.text(mid_time, max(audio_data) * 0.8, label, 
-                ha='center', va='center', fontsize=12, fontweight='bold')
+        ax.text(mid_time, max(audio_data) * 0.8, f"{label}{confidence_text}", 
+                ha='center', va='center', fontsize=10, fontweight='bold')
+        
+        # 信頼度バーを下部に表示
+        if confidences and i < len(confidences):
+            bar_height = min(audio_data) * 0.1 * confidences[i]
+            ax.axvspan(start_time, end_time, ymin=0, ymax=0.05, 
+                      alpha=0.8, color='darkblue')
     
     ax.set_xlabel('時間 (秒)', fontsize=12)
     ax.set_ylabel('振幅', fontsize=12)
-    ax.set_title('音声波形と異常検知結果', fontsize=14, fontweight='bold')
+    ax.set_title('音声波形と異常検知結果（信頼度付き）', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
     
     # 凡例
     from matplotlib.patches import Patch
     legend_elements = [
         Patch(facecolor='lightgreen', alpha=0.5, label='OK (正常)'),
-        Patch(facecolor='lightcoral', alpha=0.5, label='NG (異常)')
+        Patch(facecolor='lightcoral', alpha=0.5, label='NG (異常)'),
+        Patch(facecolor='darkblue', alpha=0.8, label='信頼度バー')
     ]
     ax.legend(handles=legend_elements, loc='upper right')
     
@@ -422,13 +440,21 @@ def main():
         try:
             devices = SimpleAudioRecorder.get_available_devices()
             if devices:
-                st.write("利用可能な入力デバイス:")
+                st.success(f"✅ {len(devices)}個のデバイスが利用可能")
                 for device in devices:
                     st.write(f"• {device['name']} ({device['channels']}ch)")
             else:
-                st.warning("入力デバイスが見つかりません")
+                st.warning("⚠️ 入力デバイスが見つかりません")
+                st.info("""**デバイスが見つからない理由:**
+                • マイクが接続されていない
+                • 権限設定が必要
+                • システム音声ドライバーの問題
+                • 他のアプリがマイクを占有""")
+                st.markdown("**解決方法:**")
+                st.code("python install_dependencies.py")
         except Exception as e:
-            st.error(f"デバイス情報取得エラー: {e}")
+            st.error(f"❌ デバイス情報取得エラー: {e}")
+            logger.error(f"Audio device query error: {e}")
     
     # モデルアップロード
     st.sidebar.subheader("🤖 モデル設定")
@@ -537,12 +563,15 @@ def main():
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
-                    # 録音実行（別スレッドで）
+                    # 録音実行（スレッドコンテキストエラー対策）
                     def record_audio():
+                        # Streamlitコンテキスト外で実行するため、直接状態更新は避ける
+                        progress_data = {'current': 0, 'total': recording_duration}
+                        
                         def progress_callback(current_time, total_time):
-                            progress = min(current_time / total_time, 1.0)
-                            progress_bar.progress(progress)
-                            status_text.text(f"録音中: {current_time:.1f}/{total_time:.1f}秒")
+                            progress_data['current'] = current_time
+                            # UI更新はメインスレッドに委譲（ログのみ記録）
+                            logger.info(f"録音進捗: {current_time:.1f}/{total_time:.1f}秒")
                         
                         success = recorder.record_and_save(
                             duration=recording_duration,
@@ -550,25 +579,43 @@ def main():
                             progress_callback=progress_callback
                         )
                         
+                        # セッション状態の更新（スレッドセーフ）
                         st.session_state.is_recording = False
-                        
-                        if success:
-                            st.session_state.last_wav_file = str(wav_path)
-                            st.success(f"✅ 録音完了！ {wav_filename} に保存されました")
-                            
-                            # 録音データを読み込み
-                            audio_data, sr = SimpleAudioRecorder.load_wav_file(str(wav_path))
-                            st.session_state.last_recording_data = audio_data
-                            
-                        else:
-                            st.error("❌ 録音に失敗しました")
-                        
-                        progress_bar.empty()
-                        status_text.empty()
+                        st.session_state.recording_result = {
+                            'success': success,
+                            'wav_path': str(wav_path),
+                            'wav_filename': wav_filename
+                        }
                     
                     # 録音スレッド開始
                     recording_thread = threading.Thread(target=record_audio)
+                    recording_thread.daemon = True
                     recording_thread.start()
+                    
+                    # 進捗表示（メインスレッドで）
+                    while st.session_state.is_recording and recording_thread.is_alive():
+                        progress_bar.progress(min(time.time() - time.time(), 1.0))
+                        status_text.text(f"録音中...")
+                        time.sleep(0.1)
+                    
+                    # 結果処理
+                    if 'recording_result' in st.session_state:
+                        result = st.session_state.recording_result
+                        if result['success']:
+                            st.session_state.last_wav_file = result['wav_path']
+                            st.success(f"✅ 録音完了！ {result['wav_filename']} に保存されました")
+                            
+                            # 録音データを読み込み
+                            audio_data, sr = SimpleAudioRecorder.load_wav_file(result['wav_path'])
+                            st.session_state.last_recording_data = audio_data
+                        else:
+                            st.error("❌ 録音に失敗しました")
+                        
+                        # クリーンアップ
+                        del st.session_state.recording_result
+                    
+                    progress_bar.empty()
+                    status_text.empty()
                     
                 except Exception as e:
                     st.error(f"録音開始エラー: {e}")
@@ -761,26 +808,67 @@ def main():
         
         # 統計情報
         predictions = st.session_state.predictions
+        confidences = st.session_state.confidences
         ok_count = predictions.count(0)
         ng_count = predictions.count(1)
         
-        col1, col2, col3 = st.columns(3)
+        # 信頼度統計
+        ok_confidences = [conf for pred, conf in zip(predictions, confidences) if pred == 0]
+        ng_confidences = [conf for pred, conf in zip(predictions, confidences) if pred == 1]
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+        
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("総時間", f"{len(predictions)}秒")
         with col2:
-            st.metric("OK（正常）", f"{ok_count} セグメント")
+            st.metric("OK（正常）", f"{ok_count} セグメント", 
+                     delta=f"信頼度: {sum(ok_confidences)/len(ok_confidences):.2f}" if ok_confidences else "信頼度: N/A")
         with col3:
-            st.metric("NG（異常）", f"{ng_count} セグメント")
+            st.metric("NG（異常）", f"{ng_count} セグメント",
+                     delta=f"信頼度: {sum(ng_confidences)/len(ng_confidences):.2f}" if ng_confidences else "信頼度: N/A")
+        with col4:
+            st.metric("平均信頼度", f"{avg_confidence:.3f}")
         
-        # 波形グラフ
-        fig = plot_results(st.session_state.audio_data, predictions, st.session_state.sample_rate)
+        # 信頼度の色分け表示
+        st.subheader("🎯 信頼度サマリー")
+        
+        confidence_cols = st.columns(len(predictions))
+        for i, (pred, conf) in enumerate(zip(predictions, confidences)):
+            with confidence_cols[i]:
+                status = "✅ OK" if pred == 0 else "❌ NG"
+                color = "green" if pred == 0 else "red"
+                st.markdown(f"**{i+1}秒目**")
+                st.markdown(f"<div style='color: {color}; font-weight: bold;'>{status}</div>", unsafe_allow_html=True)
+                st.progress(conf)
+                st.caption(f"信頼度: {conf:.3f}")
+        
+        # 波形グラフ（信頼度付き）
+        fig = plot_results(st.session_state.audio_data, predictions, 
+                          st.session_state.sample_rate, confidences)
         st.pyplot(fig)
         
-        # 詳細結果
-        with st.expander("📋 詳細結果"):
-            for i, (pred, conf) in enumerate(zip(predictions, st.session_state.confidences)):
-                status = "✅ OK" if pred == 0 else "❌ NG"
-                st.write(f"{i+1}秒目: {status} (信頼度: {conf:.3f})")
+        # 詳細結果テーブル
+        st.subheader("📋 詳細結果テーブル")
+        
+        # データフレーム作成
+        import pandas as pd
+        
+        results_data = []
+        for i, (pred, conf) in enumerate(zip(predictions, confidences)):
+            status_emoji = "✅" if pred == 0 else "❌"
+            status_text = "OK (正常)" if pred == 0 else "NG (異常)"
+            confidence_level = "高" if conf > 0.8 else "中" if conf > 0.5 else "低"
+            
+            results_data.append({
+                "時刻": f"{i+1}秒目",
+                "判定": f"{status_emoji} {status_text}",
+                "信頼度": f"{conf:.3f}",
+                "信頼度レベル": confidence_level,
+                "確信度": f"{conf*100:.1f}%"
+            })
+        
+        results_df = pd.DataFrame(results_data)
+        st.dataframe(results_df, use_container_width=True)
     
     # 説明
     st.markdown("---")
