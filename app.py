@@ -21,31 +21,14 @@ import torchaudio
 import librosa
 from pathlib import Path
 import yaml
-import time
 import logging
 from typing import Tuple, Optional
 import tempfile
-import threading
-from datetime import datetime
-
-# Simple recorderモジュールをインポート（エラーハンドリング付き）
-try:
-    from simple_recorder import SimpleAudioRecorder
-    RECORDER_AVAILABLE = True
-    RECORDER_ERROR = None
-except ImportError as e:
-    # sounddeviceが利用できない場合のフォールバック
-    from simple_recorder_fallback import FallbackAudioRecorder as SimpleAudioRecorder
-    RECORDER_AVAILABLE = False
-    RECORDER_ERROR = str(e)
-except Exception as e:
-    from simple_recorder_fallback import FallbackAudioRecorder as SimpleAudioRecorder
-    RECORDER_AVAILABLE = False
-    RECORDER_ERROR = str(e)
+import copy
 
 # Streamlitページ設定
 st.set_page_config(
-    page_title="音声検出アプリ - Simple Recording",
+    page_title="音声異常検知アプリ - ファイルアップロード",
     page_icon="🎵",
     layout="wide"
 )
@@ -223,57 +206,194 @@ def load_config():
     
     return DEFAULT_CONFIG
 
+# モデルアーキテクチャ自動検出機能
+def detect_model_architecture(model_path: Path) -> Optional[dict]:
+    """
+    保存されたモデルから自動的にアーキテクチャを検出する
+    
+    Args:
+        model_path: モデルファイルのパス
+        
+    Returns:
+        検出されたアーキテクチャに基づく設定辞書、または None
+    """
+    try:
+        # チェックポイントを読み込んでアーキテクチャを検査
+        checkpoint = torch.load(model_path, map_location='cpu')
+        
+        # CNN層の情報をstate_dictから抽出
+        cnn_layers = []
+        
+        # 重みの形状を分析してCNN層を検出
+        layer_idx = 0
+        while f'cnn.{layer_idx}.weight' in checkpoint:
+            weight_shape = checkpoint[f'cnn.{layer_idx}.weight'].shape
+            
+            # CNN層のパターン: 重みの形状は [out_channels, in_channels, kernel_size]
+            if len(weight_shape) == 3:
+                filters = weight_shape[0]
+                in_channels = weight_shape[1]
+                kernel_size = weight_shape[2]
+                
+                # ストライドとパディングを層パターンから推測（典型的な値）
+                stride = 2 if layer_idx > 0 else 1  # 最初の層は通常stride=1、その他はstride=2
+                padding = 1 if kernel_size == 3 else 0
+                
+                cnn_layers.append({
+                    'filters': int(filters),
+                    'kernel_size': int(kernel_size),
+                    'stride': stride,
+                    'padding': padding
+                })
+                
+                logger.info(f"   検出されたCNN層 {layer_idx//4}: {filters} フィルタ, カーネル {kernel_size}")
+            
+            # 次のCNN層にスキップ（各層はweight, bias, batch_norm weight, batch_norm biasを持つ）
+            layer_idx += 4
+        
+        if not cnn_layers:
+            logger.warning("チェックポイントからCNN層のアーキテクチャを検出できませんでした")
+            return None
+        
+        # アテンション層の次元を検出
+        attention_hidden_dim = 256  # デフォルト
+        attention_num_heads = 8     # デフォルト
+        
+        # アテンション層の重みから hidden_dim を検出
+        if 'attention.query.weight' in checkpoint:
+            attention_weight_shape = checkpoint['attention.query.weight'].shape
+            attention_hidden_dim = attention_weight_shape[0]
+            logger.info(f"   検出されたアテンション hidden_dim: {attention_hidden_dim}")
+        
+        # 全結合層の次元を検出
+        fc_layers = []
+        fc_idx = 0
+        while f'classifier.{fc_idx}.weight' in checkpoint:
+            weight_shape = checkpoint[f'classifier.{fc_idx}.weight'].shape
+            
+            if len(weight_shape) == 2:  # Linear層
+                out_features = weight_shape[0]
+                in_features = weight_shape[1]
+                
+                # 最終出力層をスキップ（num_classes）
+                next_fc_idx = fc_idx + 3  # ReLUとDropoutをスキップ
+                if f'classifier.{next_fc_idx}.weight' in checkpoint:
+                    fc_layers.append({
+                        'units': int(out_features),
+                        'dropout': 0.3  # デフォルトのドロップアウト
+                    })
+                    logger.info(f"   検出されたFC層 {len(fc_layers)}: {out_features} ユニット")
+            
+            fc_idx += 3  # ReLUとDropout層をスキップ
+        
+        # 検出されたアーキテクチャで設定を作成
+        detected_config = copy.deepcopy(DEFAULT_CONFIG)  # 元の設定をディープコピー
+        
+        # 検出された値で更新
+        detected_config['model']['cnn_layers'] = cnn_layers
+        detected_config['model']['attention']['hidden_dim'] = attention_hidden_dim
+        detected_config['model']['attention']['num_heads'] = attention_num_heads
+        
+        if fc_layers:
+            detected_config['model']['fully_connected'] = fc_layers
+        
+        logger.info(f"✅ モデルアーキテクチャの検出に成功:")
+        logger.info(f"   CNN層: {len(cnn_layers)}層、フィルタ数 {[l['filters'] for l in cnn_layers]}")
+        logger.info(f"   アテンション: {attention_hidden_dim}次元、{attention_num_heads}ヘッド")
+        logger.info(f"   FC層: {len(fc_layers)}層")
+        
+        return detected_config
+        
+    except Exception as e:
+        logger.warning(f"⚠️ モデルアーキテクチャを検出できませんでした: {e}")
+        return None
+
 # モデル読み込み（アップロードされたファイルまたはデフォルト）
 def load_model(model_file=None):
-    # 設定を読み込み（reference/config.yamlがあれば優先使用）
+    """
+    モデルを読み込む（アーキテクチャ自動検出機能付き）
+    """
     config = load_config()
-    model = SoundAnomalyDetector(config)
     
     if model_file is not None:
         try:
             # アップロードされたファイルからモデル読み込み
             import io
-            model_data = torch.load(io.BytesIO(model_file.read()), map_location='cpu')
+            
+            # 一時ファイルに保存してアーキテクチャ検出を実行
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                tmp_file.write(model_file.read())
+                tmp_path = tmp_file.name
+            
+            # アーキテクチャ検出を試行
+            detected_config = detect_model_architecture(Path(tmp_path))
+            
+            if detected_config:
+                logger.info("🔧 検出されたアーキテクチャでモデルを作成中")
+                model = SoundAnomalyDetector(detected_config)
+                st.info("🔍 アップロードされたモデルからアーキテクチャを自動検出しました")
+            else:
+                logger.info("📋 デフォルト設定でモデルを作成中")
+                model = SoundAnomalyDetector(config)
+            
+            # モデルの重みを読み込み
+            model_data = torch.load(tmp_path, map_location='cpu')
             model.load_state_dict(model_data)
+            
+            # 一時ファイルを削除
+            Path(tmp_path).unlink()
+            
             logger.info("アップロードされたモデルを読み込みました")
             st.success("✅ カスタムモデルを読み込みました")
+            
         except Exception as e:
             logger.error(f"モデル読み込みエラー: {e}")
             st.error(f"モデル読み込みに失敗しました: {e}")
             st.info("ベースラインモデルを使用します")
+            model = SoundAnomalyDetector(config)
+            _initialize_baseline_model(model)
     else:
-        # referenceフォルダのbest_model.pthをチェック
-        reference_model_path = Path('reference/best_model.pth')
-        default_model_path = Path('models/best_model.pth')
+        # referenceフォルダのモデルファイルをチェック
+        model_candidates = [
+            Path('reference/best_model.pth'),
+            Path('reference/old_best_model.pth'),
+            Path('models/best_model.pth')
+        ]
         
         model_loaded = False
         
-        # まずreferenceフォルダを試す
-        if reference_model_path.exists():
-            try:
-                state_dict = torch.load(reference_model_path, map_location='cpu')
-                model.load_state_dict(state_dict)
-                logger.info("reference フォルダの訓練済みモデルを読み込みました")
-                st.success("✅ referenceフォルダのモデルを読み込みました")
-                model_loaded = True
-            except Exception as e:
-                logger.warning(f"referenceモデル読み込み失敗: {e}")
-        
-        # 次にmodelsフォルダを試す
-        if not model_loaded and default_model_path.exists():
-            try:
-                state_dict = torch.load(default_model_path, map_location='cpu')
-                model.load_state_dict(state_dict)
-                logger.info("models フォルダの訓練済みモデルを読み込みました")
-                st.info("📁 modelsフォルダのモデルを使用中")
-                model_loaded = True
-            except Exception as e:
-                logger.warning(f"デフォルトモデル読み込み失敗: {e}")
+        for model_path in model_candidates:
+            if model_path.exists():
+                try:
+                    # アーキテクチャ検出を試行
+                    detected_config = detect_model_architecture(model_path)
+                    
+                    if detected_config:
+                        logger.info(f"🔧 {model_path.name}からアーキテクチャを検出してモデルを作成中")
+                        model = SoundAnomalyDetector(detected_config)
+                        st.info(f"🔍 {model_path.name}からアーキテクチャを自動検出しました")
+                    else:
+                        logger.info(f"📋 {model_path.name}に対してデフォルト設定でモデルを作成中")
+                        model = SoundAnomalyDetector(config)
+                    
+                    # モデルの重みを読み込み
+                    state_dict = torch.load(model_path, map_location='cpu')
+                    model.load_state_dict(state_dict)
+                    
+                    logger.info(f"{model_path}から訓練済みモデルを読み込みました")
+                    st.success(f"✅ {model_path.name}を読み込みました")
+                    model_loaded = True
+                    break
+                    
+                except Exception as e:
+                    logger.warning(f"{model_path}のモデル読み込み失敗: {e}")
+                    continue
         
         if not model_loaded:
             # ベースラインモデルの初期化
             logger.info("ベースラインモデルを初期化します")
             st.info("🤖 ベースラインモデルを使用します")
+            model = SoundAnomalyDetector(config)
             _initialize_baseline_model(model)
     
     model.eval()
@@ -394,67 +514,22 @@ def plot_results(audio_data, predictions, sample_rate=44100, confidences=None):
     plt.tight_layout()
     return fig
 
-# WAVファイル処理関数
-def process_wav_file(file_path: str, model, sample_rate: int = 44100):
-    """
-    WAVファイルを読み込んでモデルで処理
-    
-    Args:
-        file_path: WAVファイルパス
-        model: 音声検知モデル
-        sample_rate: サンプリング周波数
-        
-    Returns:
-        tuple: (音声データ, 予測結果, 信頼度)
-    """
-    try:
-        # WAVファイル読み込み
-        audio_data, sr = SimpleAudioRecorder.load_wav_file(file_path)
-        
-        if len(audio_data) == 0:
-            return None, None, None
-        
-        # サンプリング周波数変換（必要に応じて）
-        if sr != sample_rate:
-            audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=sample_rate)
-        
-        # 音声分析
-        segments, predictions, confidences = analyze_audio(audio_data, model, sample_rate)
-        
-        return audio_data, predictions, confidences
-        
-    except Exception as e:
-        logger.error(f"WAVファイル処理エラー: {e}")
-        return None, None, None
-
 # メイン処理
 def main():
-    st.title("🎵 音声異常検知アプリ - Simple Recording")
-    st.markdown("**シンプルな録音機能でWAVファイルを保存し、1秒毎にOK/NGを判定します**")
+    st.title("🎵 音声異常検知アプリ - ファイルアップロード")
+    st.markdown("**音声ファイルをアップロードして、1秒毎にOK/NGを判定します**")
+    
+    # 機能改訂の説明
+    st.info("""
+    🔄 **アプリが新しくなりました！**
+    
+    - 📤 **ファイルアップロード専用**: より安定した音声分析体験を提供
+    - 🔍 **自動アーキテクチャ検出**: 異なるモデル形状に自動対応
+    - 🎯 **シンプルで直感的**: 複雑な録音設定は不要
+    """)
     
     # サイドバー設定
     st.sidebar.header("⚙️ 設定")
-    
-    # オーディオデバイス情報表示
-    with st.sidebar.expander("🎤 オーディオデバイス情報"):
-        try:
-            devices = SimpleAudioRecorder.get_available_devices()
-            if devices:
-                st.success(f"✅ {len(devices)}個のデバイスが利用可能")
-                for device in devices:
-                    st.write(f"• {device['name']} ({device['channels']}ch)")
-            else:
-                st.warning("⚠️ 入力デバイスが見つかりません")
-                st.info("""**デバイスが見つからない理由:**
-                • マイクが接続されていない
-                • 権限設定が必要
-                • システム音声ドライバーの問題
-                • 他のアプリがマイクを占有""")
-                st.markdown("**解決方法:**")
-                st.code("python install_dependencies.py")
-        except Exception as e:
-            st.error(f"❌ デバイス情報取得エラー: {e}")
-            logger.error(f"Audio device query error: {e}")
     
     # モデルアップロード
     st.sidebar.subheader("🤖 モデル設定")
@@ -471,301 +546,13 @@ def main():
         with st.spinner("モデルを読み込み中..."):
             st.session_state.model = load_model(uploaded_model)
     
-    # 録音設定
-    st.sidebar.subheader("📹 録音設定")
-    recording_duration = st.sidebar.slider("録音時間 (秒)", 1, 30, 5)
-    
-    # 音声録音セクション
-    st.header("🎤 音声録音 (WAV保存)")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("**Simple Recorderを使用したWAV録音機能**")
-        
-        # 録音機能の利用可否を表示
-        if not RECORDER_AVAILABLE:
-            st.warning("⚠️ 録音機能が利用できません")
-            st.info(f"**エラー詳細**: {RECORDER_ERROR}")
-            
-            # システム依存関係の解決方法を表示
-            with st.expander("🔧 録音機能を有効にする方法", expanded=True):
-                st.markdown("""
-                録音機能を有効にするには、以下の手順を実行してください：
-                
-                **1. システム依存関係のインストール**
-                ```bash
-                # インストールスクリプトを実行
-                python install_dependencies.py
-                ```
-                
-                **2. 手動インストール（上記が失敗した場合）**
-                
-                **Google Colab環境の場合:**
-                ```bash
-                !apt-get update -qq
-                !apt-get install -y portaudio19-dev python3-pyaudio alsa-utils
-                !pip install sounddevice>=0.4.0
-                ```
-                
-                **Linux環境の場合:**
-                ```bash
-                sudo apt-get update
-                sudo apt-get install -y portaudio19-dev python3-pyaudio alsa-utils
-                pip install sounddevice>=0.4.0
-                ```
-                
-                **3. 代替手段**
-                現在は**WAVファイルアップロード機能**をご利用ください（下記参照）
-                """)
-            
-            # ファイルアップロードボタンを強調表示
-            st.markdown("---")
-            st.markdown("### 📂 代替手段: WAVファイルをアップロード")
-            if st.button("📤 WAVファイルアップロード機能に移動", use_container_width=True):
-                st.rerun()
-            st.markdown("---")
-        else:
-            st.success("✅ 録音機能が利用可能です")
-        
-        # 録音制御
-        if 'recorder' not in st.session_state:
-            st.session_state.recorder = SimpleAudioRecorder(sample_rate=sample_rate)
-        
-        recorder = st.session_state.recorder
-        
-        # 録音状態の初期化
-        if 'is_recording' not in st.session_state:
-            st.session_state.is_recording = False
-        if 'last_recording_data' not in st.session_state:
-            st.session_state.last_recording_data = None
-        if 'last_wav_file' not in st.session_state:
-            st.session_state.last_wav_file = None
-        
-        # 録音ボタン
-        col_rec1, col_rec2, col_rec3 = st.columns(3)
-        
-        with col_rec1:
-            if st.button("🎙️ 録音開始", type="primary", disabled=st.session_state.is_recording):
-                try:
-                    # 録音ファイル名を生成
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    wav_filename = f"recording_{timestamp}.wav"
-                    wav_path = Path("recordings") / wav_filename
-                    
-                    # recordingsフォルダ作成
-                    Path("recordings").mkdir(exist_ok=True)
-                    
-                    st.session_state.is_recording = True
-                    st.session_state.current_wav_file = str(wav_path)
-                    
-                    # 進捗表示用のプレースホルダー
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    # 録音実行（スレッドコンテキストエラー対策）
-                    def record_audio():
-                        # Streamlitコンテキスト外で実行するため、直接状態更新は避ける
-                        progress_data = {'current': 0, 'total': recording_duration}
-                        
-                        def progress_callback(current_time, total_time):
-                            progress_data['current'] = current_time
-                            # UI更新はメインスレッドに委譲（ログのみ記録）
-                            logger.info(f"録音進捗: {current_time:.1f}/{total_time:.1f}秒")
-                        
-                        success = recorder.record_and_save(
-                            duration=recording_duration,
-                            file_path=str(wav_path),
-                            progress_callback=progress_callback
-                        )
-                        
-                        # セッション状態の更新（スレッドセーフ）
-                        st.session_state.is_recording = False
-                        st.session_state.recording_result = {
-                            'success': success,
-                            'wav_path': str(wav_path),
-                            'wav_filename': wav_filename
-                        }
-                    
-                    # 録音スレッド開始
-                    recording_thread = threading.Thread(target=record_audio)
-                    recording_thread.daemon = True
-                    recording_thread.start()
-                    
-                    # 進捗表示（メインスレッドで）
-                    while st.session_state.is_recording and recording_thread.is_alive():
-                        progress_bar.progress(min(time.time() - time.time(), 1.0))
-                        status_text.text(f"録音中...")
-                        time.sleep(0.1)
-                    
-                    # 結果処理
-                    if 'recording_result' in st.session_state:
-                        result = st.session_state.recording_result
-                        if result['success']:
-                            st.session_state.last_wav_file = result['wav_path']
-                            st.success(f"✅ 録音完了！ {result['wav_filename']} に保存されました")
-                            
-                            # 録音データを読み込み
-                            audio_data, sr = SimpleAudioRecorder.load_wav_file(result['wav_path'])
-                            st.session_state.last_recording_data = audio_data
-                        else:
-                            st.error("❌ 録音に失敗しました")
-                        
-                        # クリーンアップ
-                        del st.session_state.recording_result
-                    
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                except Exception as e:
-                    st.error(f"録音開始エラー: {e}")
-                    st.session_state.is_recording = False
-        
-        with col_rec2:
-            if st.button("⏹️ 録音停止", type="secondary", disabled=not st.session_state.is_recording):
-                if recorder.is_recording:
-                    audio_data = recorder.stop_recording()
-                    if len(audio_data) > 0:
-                        # WAVファイルに保存
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        wav_filename = f"recording_{timestamp}_manual.wav"
-                        wav_path = Path("recordings") / wav_filename
-                        Path("recordings").mkdir(exist_ok=True)
-                        
-                        if recorder.save_to_wav(audio_data, str(wav_path)):
-                            st.session_state.last_wav_file = str(wav_path)
-                            st.session_state.last_recording_data = audio_data
-                            st.success(f"✅ 録音停止・保存完了！ {wav_filename}")
-                        else:
-                            st.error("❌ WAVファイル保存に失敗しました")
-                    else:
-                        st.warning("録音データがありません")
-                
-                st.session_state.is_recording = False
-        
-        with col_rec3:
-            if st.button("🔄 リセット"):
-                # 録音停止
-                if recorder.is_recording:
-                    recorder.stop_recording()
-                
-                # セッションクリア
-                for key in ['last_recording_data', 'last_wav_file', 'is_recording', 
-                           'audio_data', 'predictions', 'confidences']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                
-                st.success("リセットしました")
-                st.rerun()
-        
-        # 録音状態表示
-        if st.session_state.is_recording:
-            st.warning("🔴 録音中...")
-        elif st.session_state.last_wav_file:
-            st.info(f"📁 最新の録音: {Path(st.session_state.last_wav_file).name}")
-        
-        # WAVファイル分析ボタン
-        if st.session_state.last_wav_file and not st.session_state.is_recording:
-            if st.button("🔍 WAVファイル分析", type="primary"):
-                with st.spinner("WAVファイルを分析中..."):
-                    audio_data, predictions, confidences = process_wav_file(
-                        st.session_state.last_wav_file, 
-                        st.session_state.model, 
-                        sample_rate
-                    )
-                    
-                    if audio_data is not None:
-                        # 結果をセッションに保存
-                        st.session_state.audio_data = audio_data
-                        st.session_state.predictions = predictions
-                        st.session_state.confidences = confidences
-                        st.session_state.sample_rate = sample_rate
-                        st.success("🎯 WAVファイル分析完了！")
-                    else:
-                        st.error("WAVファイルの分析に失敗しました")
-    
-    with col2:
-        st.markdown("### 📊 録音状況")
-        
-        if st.session_state.last_recording_data is not None:
-            duration = len(st.session_state.last_recording_data) / sample_rate
-            st.metric("録音時間", f"{duration:.1f}秒")
-            st.metric("データサイズ", f"{len(st.session_state.last_recording_data):,} サンプル")
-            st.metric("ファイル", Path(st.session_state.last_wav_file).name if st.session_state.last_wav_file else "なし")
-        else:
-            st.metric("録音時間", "0.0秒")
-            st.metric("データサイズ", "0 サンプル")
-            st.metric("ファイル", "なし")
-    
-    # 保存されたWAVファイル一覧
-    st.header("📁 保存されたWAVファイル")
-    recordings_path = Path("recordings")
-    if recordings_path.exists():
-        wav_files = list(recordings_path.glob("*.wav"))
-        if wav_files:
-            # ファイル選択
-            selected_file = st.selectbox(
-                "WAVファイルを選択",
-                options=[f.name for f in sorted(wav_files, reverse=True)],
-                help="分析したいWAVファイルを選択してください"
-            )
-            
-            if selected_file:
-                selected_path = recordings_path / selected_file
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    if st.button("🔍 選択ファイル分析"):
-                        with st.spinner(f"{selected_file} を分析中..."):
-                            audio_data, predictions, confidences = process_wav_file(
-                                str(selected_path), 
-                                st.session_state.model, 
-                                sample_rate
-                            )
-                            
-                            if audio_data is not None:
-                                st.session_state.audio_data = audio_data
-                                st.session_state.predictions = predictions
-                                st.session_state.confidences = confidences
-                                st.session_state.sample_rate = sample_rate
-                                st.success(f"✅ {selected_file} の分析完了！")
-                            else:
-                                st.error(f"❌ {selected_file} の分析に失敗しました")
-                
-                with col2:
-                    # ダウンロードボタン
-                    if selected_path.exists():
-                        with open(selected_path, "rb") as f:
-                            st.download_button(
-                                label="📥 ダウンロード",
-                                data=f.read(),
-                                file_name=selected_file,
-                                mime="audio/wav"
-                            )
-                
-                with col3:
-                    # ファイル削除
-                    if st.button("🗑️ ファイル削除", type="secondary"):
-                        if selected_path.exists():
-                            selected_path.unlink()
-                            st.success(f"✅ {selected_file} を削除しました")
-                            st.rerun()
-        else:
-            st.info("保存されたWAVファイルはありません")
-    else:
-        st.info("recordingsフォルダが見つかりません")
-    
     # 音声ファイルアップロード機能
-    if not RECORDER_AVAILABLE:
-        st.header("📤 音声ファイルアップロード（メイン機能）")
-        st.info("🎤 録音機能が利用できないため、WAVファイルアップロード機能をメインとしてご利用ください")
-    else:
-        st.header("📤 音声ファイルアップロード")
+    st.header("📤 音声ファイルアップロード")
     
     uploaded_audio = st.file_uploader(
-        "外部音声ファイルをアップロード", 
-        type=['wav', 'mp3', 'flac', 'm4a'],
-        help="外部の音声ファイルをアップロードして分析できます。録音機能が利用できない環境では、この機能をメインとしてご利用ください。"
+        "音声ファイルをアップロードしてください", 
+        type=['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg'],
+        help="対応フォーマット: WAV, MP3, FLAC, M4A, AAC, OGG"
     )
     
     if uploaded_audio:
@@ -780,7 +567,17 @@ def main():
                 audio_data, sr = librosa.load(tmp_path, sr=sample_rate, mono=True)
                 
                 if len(audio_data) > sample_rate:  # 最低1秒必要
-                    st.success("✅ 音声ファイル読み込み完了！")
+                    st.success(f"✅ 音声ファイル読み込み完了！ ({uploaded_audio.name})")
+                    
+                    # ファイル情報表示
+                    duration = len(audio_data) / sample_rate
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("ファイル名", uploaded_audio.name)
+                    with col2:
+                        st.metric("再生時間", f"{duration:.1f}秒")
+                    with col3:
+                        st.metric("サンプリング周波数", f"{sample_rate}Hz")
                     
                     # 音声分析
                     with st.spinner("音声を分析中..."):
@@ -793,6 +590,9 @@ def main():
                     st.session_state.predictions = predictions
                     st.session_state.confidences = confidences
                     st.session_state.sample_rate = sample_rate
+                    
+                    st.success("🎯 音声分析完了！")
+                    
                 else:
                     st.error("音声ファイルが短すぎます。最低1秒以上の音声が必要です。")
                     
@@ -801,6 +601,23 @@ def main():
                 
             except Exception as e:
                 st.error(f"音声ファイル処理エラー: {e}")
+                logger.error(f"Audio file processing error: {e}")
+    else:
+        # ファイルがアップロードされていない場合のガイド
+        st.markdown("""
+        ### 📋 使用方法
+        
+        1. **上記のボタンをクリック**して音声ファイルを選択
+        2. **ファイル形式**: WAV, MP3, FLAC, M4A, AAC, OGG
+        3. **ファイルサイズ**: 最大200MB（Streamlitの制限）
+        4. **音声長**: 最低1秒以上
+        
+        ### 💡 対応機能
+        
+        - 🔍 **自動アーキテクチャ検出**: 異なるモデル次元に自動対応
+        - 📊 **詳細分析結果**: 1秒毎の判定と信頼度表示
+        - 📈 **視覚的結果**: 波形グラフと色分け表示
+        """)
     
     # 結果表示
     if 'audio_data' in st.session_state and 'predictions' in st.session_state:
@@ -872,31 +689,23 @@ def main():
     
     # 説明
     st.markdown("---")
-    st.markdown("### 📖 使い方")
+    st.markdown("### 📖 アプリについて")
     st.markdown("""
-    #### 🎤 Simple Recording方式:
-    1. **録音時間設定**: サイドバーで録音時間を選択
-    2. **録音開始**: 「🎙️ 録音開始」ボタンでWAV録音開始
-    3. **自動停止**: 設定時間で自動停止・WAV保存
-    4. **分析実行**: 「🔍 WAVファイル分析」で解析開始
+    #### 🎯 主な機能:
+    - **📤 ファイルアップロード**: 様々な音声形式に対応
+    - **🔍 自動アーキテクチャ検出**: 異なるモデル次元に自動適応
+    - **📊 詳細分析**: 1秒毎の判定と信頼度表示
+    - **📈 視覚化**: 波形グラフと結果の色分け表示
     
-    #### 📁 WAVファイル管理:
-    - 録音されたWAVファイルは`recordings/`フォルダに保存
-    - ファイル一覧から過去の録音を選択・分析可能
-    - ダウンロード・削除機能付き
+    #### 🤖 モデル対応:
+    - **reference/best_model.pth**: 最新の訓練済みモデル
+    - **reference/old_best_model.pth**: 旧バージョンモデルにも対応
+    - **カスタムモデル**: 独自の.pthファイルをアップロード可能
     
-    #### 📤 ファイルアップロード:
-    - 外部音声ファイル（WAV, MP3等）のアップロード・分析
-    
-    **判定について:**
+    #### 📝 判定について:
     - 🟢 **OK（正常）**: 正常な音声と判定
     - 🔴 **NG（異常）**: 異常な音声と判定
-    
-    **改善点:**
-    - WebRTCによる複雑な録音処理を排除
-    - sounddeviceによる安定した録音
-    - WAVファイルへの直接保存
-    - ファイル管理機能の追加
+    - 📊 **信頼度**: 0.000-1.000の範囲で判定の確信度を表示
     """)
 
 if __name__ == "__main__":
