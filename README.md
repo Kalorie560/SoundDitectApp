@@ -1,147 +1,175 @@
-# SoundDitectApp
+# SoundDitect
 
-1D CNNモデルを使用したリアルタイム音声録音・分類のStreamlitウェブアプリケーションです。
+音声異常検知AIモデル訓練システム / Sound Anomaly Detection AI Training System
 
-## 機能
+---
 
-- **リアルタイム音声録音**: `streamlit-webrtc`を使用してブラウザからマイク音声をキャプチャ
-- **1D CNN分類**: 音声セグメントを1秒ごとにOK (0) またはNG (1) として分類
-- **音声処理**: 音声前処理を自動処理（22050 Hzサンプリング、モノラル変換、長さ正規化）
-- **可視化**: 時間領域波形グラフに色分けされたセグメントで結果を表示
-- **モデルサポート**: 事前学習済みPyTorchモデル（.pthファイル）の読み込み
+## 概要
 
-## インストール
+SoundDitectは、JSONデータファイルから音声異常検知AIモデルを訓練・生成する専用システムです。
+1D-CNN + Attention機構を使用した高精度な音声異常検知モデルの学習が可能です。
 
-1. リポジトリをクローン:
+## 主な機能
+
+- 🧠 **AIモデル訓練**: 1D-CNN + Attention機構による高精度な異常音検知モデル
+- 📊 **JSONデータ学習**: dataディレクトリ内のJSONファイルを使用した自動学習
+- 📈 **実験管理**: ClearMLによる学習プロセスの記録・管理
+- ⚡ **メモリ効率**: 大容量データに対応したストリーミング処理
+- 🔧 **設定管理**: config.yamlによる詳細な学習パラメータ設定
+
+## セットアップと実行手順
+
+### 1. 環境準備
+
 ```bash
-git clone https://github.com/Kalorie560/SoundDitectApp.git
-cd SoundDitectApp
-```
+# リポジトリをクローン
+git clone https://github.com/Kalorie560/SoundDitect.git
+cd SoundDitect
 
-2. 依存関係をインストール:
-```bash
+# 仮想環境を作成・有効化
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# pipを最新バージョンにアップグレード（重要）
+pip install --upgrade pip
+
+# 依存関係をインストール
 pip install -r requirements.txt
 ```
 
-## 使用方法
+### 2. ClearML設定（推奨）
 
-1. Streamlitアプリを実行:
 ```bash
-streamlit run app.py
+# ClearMLを設定（以下のいずれかの方法を選択）
+
+# 方法1: 自動設定スクリプトを使用（推奨）
+python scripts/setup_clearml.py
+
+# 方法2: 手動設定
+clearml-init
+
+# 方法3: 環境変数で設定
+export CLEARML_WEB_HOST=https://app.clear.ml
+export CLEARML_API_HOST=https://api.clear.ml
+export CLEARML_FILES_HOST=https://files.clear.ml
+export CLEARML_API_ACCESS_KEY=your_access_key_here
+export CLEARML_API_SECRET_KEY=your_secret_key_here
 ```
 
-2. サイドバーを使用して学習済みモデル（.pthファイル）をアップロード
+> 🌟 **ClearMLアカウント**: [https://app.clear.ml](https://app.clear.ml) でアカウント作成後、プロフィールページから認証情報を取得してください。
 
-3. 「Start」をクリックして音声録音を開始
+### 3. 学習データの準備
 
-4. マイクに向かって話す - アプリは1秒ごとのチャンクをリアルタイムで処理
+独自のJSONデータファイルを`./data`ディレクトリに配置してください。
 
-5. 「Stop」をクリックして録音を終了し、結果を表示
+**データ形式要件**:
+```json
+{
+  "waveforms": [
+    [0.0, 0.01, -0.01, 0.02, ...],  // 44100個の音声サンプル（1秒分）
+    [0.0, 0.0, 0.02, 0.05, ...]
+  ],
+  "labels": [
+    "OK",   // 正常音
+    "NG"    // 異常音
+  ],
+  "fs": 44100,        // サンプリング周波数
+  "metric": "RMS"     // 測定指標
+}
+```
 
-## モデル要件
+**重要**: システムは新旧両方のデータ形式に対応しています：
+- **新形式**: `{"waveforms": [...], "labels": ["OK", "NG"]}` (推奨)
+- **旧形式**: `[{"Waveform": [...], "Labels": 0}]` (互換性のため)
 
-アプリケーションは以下の仕様のPyTorchモデルを想定しています：
+### 4. モデル学習
 
-- **入力形状**: `(batch_size, channels, length) = (1, 1, 44100)` または `(1, 1, 22050)`（自動適応）
-- **出力**: 二値分類（2クラス: OK=0, NG=1）
-- **アーキテクチャ**: `nn.Conv1d`レイヤーを使用した1D CNN
-- **音声フォーマット**: 44.1kHz（訓練設定）または22050 Hzサンプリングレート、モノラルチャンネル、1秒セグメント
+```bash
+# モデルを学習（すべての設定はconfig.yamlから読み込まれます）
+python scripts/train_model.py
+```
 
-### サポートされるモデルアーキテクチャ
+## プロジェクト構造
 
-アプリケーションは自動的にモデルアーキテクチャを検出し、以下の形式をサポートします：
+```
+SoundDitect/
+├── config.yaml              # 設定ファイル
+├── requirements.txt          # Python依存関係
+├── backend/                 # バックエンドコード
+│   ├── audio_processor.py  # 音声前処理
+│   └── model_manager.py    # AIモデル管理
+├── scripts/                 # ユーティリティスクリプト
+│   ├── train_model.py      # モデル学習
+│   └── setup_clearml.py    # ClearML設定スクリプト
+├── models/                  # 学習済みモデル保存先
+├── data/                    # 学習データ
+├── logs/                    # ログファイル
+└── outputs/                 # 実験結果
+```
 
-1. **個別レイヤーアーキテクチャ**: 
-   - レイヤーが個別に定義されている（`conv1`, `conv2`, `fc1`, etc.）
-   - 従来のモデル定義方式
+## システム要件
 
-2. **Sequential アーキテクチャ**:
-   - レイヤーが`nn.Sequential`で組織化されている（`cnn.0`, `cnn.1`, `classifier.0`, etc.）
-   - よりモジュラーなモデル設計
+**CPU要件:**
+- **最小**: Intel Core i5-8th gen / AMD Ryzen 5 3600 以上
+- **推奨**: Intel Core i7-10th gen / AMD Ryzen 7 4700U 以上  
 
-3. **Attention付きモデル**:
-   - Attentionメカニズムを含むモデル（`attention.query`, `attention.key`, etc.）
-   - より高度な特徴抽出
+**GPU要件:**
+- **CPU使用時**: GPUは不要（統合グラフィックスで十分）
+- **GPU使用時（オプション）**: NVIDIA GTX 1060 / RTX 3050 以上（CUDA対応）
 
-### 動的モデル読み込み機能 🆕
+**メモリ要件:**
+- **最小**: 4GB RAM
+- **推奨**: 8GB RAM 以上
 
-- **訓練設定完全対応**: 訓練時の設定（44100サンプル、kernel_size=3、stride=[1,2,2]）を自動検出・適用
-- **自動アーキテクチャ適応**: チェックポイントの重みサイズを解析して動的にモデルを構築
-- **柔軟なチャンネル数**: 32→64→128 や 64→128→256 など異なるチャンネル構成に自動対応
-- **可変カーネルサイズ**: kernel_size=3（小カーネル）, 128, 256（大カーネル）など様々なサイズに対応
-- **ストライドパターン検出**: カーネルサイズに基づいてストライド[1,2,2]または[4,2,2]を自動選択
-- **分類器入力サイズ自動調整**: チェックポイントから実際の分類器入力次元を抽出して使用
-- **アテンション対応強化**: MultiHeadAttention（hidden_dim=256, num_heads=8）を自動検出・構築
-- **プログレッシブ読み込み**: 
-  1. 厳密読み込み (strict=True)
-  2. 部分読み込み (strict=False) 
-  3. キーマッピング変換
-  4. レガシー読み込み
-- **詳細ログ**: 読み込み過程での詳細な情報表示
+**ストレージ要件:**
+- **必要容量**: 2GB以上の空き容量
+- **推奨**: SSD（高速なファイルアクセス）
 
-## 音声処理
+## AIモデルアーキテクチャ
 
-アプリは以下を自動で処理します：
-- 22050 Hzへのリサンプリング（表示用）
-- モノラル変換（ステレオ入力の場合）
-- 長さ正規化（44100サンプル[訓練設定]または22050サンプルへのパディングまたは切り詰め）
-- 1秒セグメントへのリアルタイムチャンク分割（訓練設定に基づく動的調整）
+1. **前処理**: バンドパスフィルタ + 正規化
+2. **1D-CNN**: 時系列パターンの特徴抽出
+3. **Multi-Head Attention**: 重要な時間フレームに注目
+4. **分類器**: 正常/異常の2クラス分類
 
-## 結果の可視化
+## ClearML実験管理
 
-録音後、アプリは以下を表示します：
-- 色分けされた背景の音声波形プロット
-- 緑のセグメント: OK分類
-- 赤のセグメント: NG分類
-- 要約統計（総持続時間、OK/NG数）
-- 詳細な秒単位の結果
+```bash
+# ClearML設定（初回のみ）
+clearml-init
 
-## 技術詳細
+# 実験の可視化
+clearml-serving --open
+```
 
-- StreamlitとStreamlit-webrtcで構築
-- モデル推論にPyTorchを使用
-- torchaudioとnumpyで音声処理
-- matplotlibで可視化
-- スレッドセーフな音声バッファリングと処理
+## カスタマイズ
+
+`config.yaml`ファイルを編集して以下をカスタマイズできます：
+- モデルアーキテクチャパラメータ
+- 学習設定（エポック数、バッチサイズなど）
+- 音声処理設定（サンプリング周波数、フィルタ設定）
+- ClearMLプロジェクト設定
 
 ## トラブルシューティング
 
-### モデル読み込みエラー
+**ModuleNotFoundError: No module named 'yaml'**
+- PyYAMLが正しくインストールされていない場合に発生します
+- 解決方法:
+  ```bash
+  pip install --upgrade pip
+  pip install pyyaml==6.0.1
+  pip install -r requirements.txt
+  ```
 
-**問題**: `Missing key(s) in state_dict`、`Unexpected key(s) in state_dict`、または`size mismatch`エラー
+**モデル学習エラー: 'num_samples should be a positive integer value, but got num_samples=0'**
+- **原因**: データ分割問題またはJSONファイルの形式エラー
+- **解決方法**:
+  1. ./dataディレクトリに正しい形式のJSONファイルを配置
+  2. データ形式を確認: `{'waveforms': [[...]], 'labels': ['OK', 'NG'], 'fs': 44100}`
 
-**✅ 自動解決機能**: 
-アプリケーションは2025年6月更新で以下の問題を自動的に解決します：
+**ClearML SSL接続エラー**
+- **対処**: エラーが発生してもモデル学習は継続されます（ClearMLなしで実行）
 
-1. **訓練設定ベース動的適応** 🔧
-   - 訓練時設定（44100サンプル、64→128→256チャンネル、kernel_size=3、stride=[1,2,2]）を自動検出
-   - チェックポイントの重みを解析して適切なモデル構造を自動構築
-   - 異なるチャンネル数（32→64→128 vs 64→128→256）に対応
-   - 異なるカーネルサイズ（3 vs 256）とストライドパターンに対応
-   - 分類器入力次元の自動検出（例: チェックポイント [512, 256] vs 計算値 [512, 5376] の不整合を解決）
-   - アテンション機構の自動構築（hidden_dim=256, num_heads=8）
+## ライセンス
 
-2. **プログレッシブ読み込み** 📚
-   - 厳密読み込み (strict=True) → 部分読み込み (strict=False) → キーマッピング → レガシー読み込み
-
-3. **Streamlit WebRTC API修正** 🔧
-   - `ClientSettings.MediaStreamConstraints.Mode.SENDONLY` → `WebRtcMode.SENDONLY`
-
-**対応状況の確認**: モデル読み込み時にStreamlitアプリで以下のメッセージを確認：
-- "Sequential architecture detected - analyzing training configuration" - Sequential形式のモデル
-- "Individual layer architecture detected - analyzing training configuration" - 個別レイヤー形式のモデル  
-- "Attention mechanism detected" - Attention付きモデル
-- "Detected channels: [64, 128, 256]" - 検出されたチャンネル構成
-- "Detected kernel sizes: [3, 3, 3]" - 検出されたカーネルサイズ
-- "Detected strides: [1, 2, 2]" - 検出されたストライドパターン
-- "Detected classifier input size: 256" - 分類器入力次元の自動検出
-- "Detected FC layer sizes: [512, 256]" - FC層サイズの自動検出
-- "Attention hidden dim: 256, heads: 8" - アテンション設定の検出
-- "✅ Model loaded successfully with strict loading" - 成功
-- "✅ Fallback loading with training config successful" - 訓練設定での代替読み込み成功
-
-### 音声品質の改善
-
-- 静かな環境での録音を推奨
-- マイクとの距離を適切に保つ
-- 1秒以上の音声で十分なデータを確保
+This project is licensed under the MIT License - see the LICENSE file for details.
