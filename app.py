@@ -18,6 +18,8 @@ import tempfile
 
 # 警告を抑制
 warnings.filterwarnings("ignore")
+# torch.classes警告を抑制（Streamlit互換性問題）
+warnings.filterwarnings("ignore", ".*torch._classes.*")
 
 # Streamlitページ設定
 st.set_page_config(
@@ -424,27 +426,61 @@ def main():
             if st.session_state.recording:
                 st.warning("🔴 録音中... 停止ボタンを押してください")
             elif st.session_state.audio_buffer:
-                buffer_duration = len(np.concatenate(st.session_state.audio_buffer)) / sample_rate if st.session_state.audio_buffer else 0
-                st.info(f"📊 録音済み: {buffer_duration:.1f}秒")
+                try:
+                    valid_chunks = [chunk for chunk in st.session_state.audio_buffer if len(chunk) > 0]
+                    if valid_chunks:
+                        buffer_data = np.concatenate(valid_chunks)
+                        buffer_duration = len(buffer_data) / sample_rate
+                        st.info(f"📊 録音済み: {buffer_duration:.1f}秒 ({len(valid_chunks)} チャンク)")
+                    else:
+                        st.info("📊 録音済み: 0.0秒")
+                except Exception as e:
+                    logger.warning(f"Duration calculation error: {e}")
+                    st.info("📊 録音済み: 計算中...")
                 
             # 録音中の音声データ処理
             if webrtc_ctx.audio_receiver and st.session_state.get('recording', False):
                 try:
-                    audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=0.1)
+                    # より長いタイムアウトで安定したフレーム取得
+                    audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1.0)
                     if audio_frames:
                         for audio_frame in audio_frames:
                             sound = audio_frame.to_ndarray()
-                            # ステレオの場合はモノラルに変換
-                            if len(sound.shape) > 1 and sound.shape[1] > 1:
-                                sound = np.mean(sound, axis=1)
-                            st.session_state.audio_buffer.append(sound.flatten())
+                            
+                            # デバッグ情報をログ出力
+                            logger.debug(f"Audio frame shape: {sound.shape}, dtype: {sound.dtype}")
+                            
+                            # 複数チャンネルの場合はモノラルに変換
+                            if len(sound.shape) > 1:
+                                if sound.shape[1] > 1:  # ステレオ等
+                                    sound = np.mean(sound, axis=1)
+                                else:  # 既にモノラル（shape: [samples, 1]）
+                                    sound = sound.flatten()
+                            
+                            # データ型をfloat32に変換
+                            if sound.dtype != np.float32:
+                                sound = sound.astype(np.float32)
+                            
+                            # 振幅をクリップして異常値を防ぐ
+                            sound = np.clip(sound, -1.0, 1.0)
+                            
+                            # セッションバッファに追加
+                            if len(sound) > 0:
+                                st.session_state.audio_buffer.append(sound)
+                                logger.debug(f"Audio chunk added: {len(sound)} samples")
                             
                 except Exception as e:
-                    logger.warning(f"音声フレーム処理エラー: {e}")
-                    # 録音エラーの場合は録音を停止
-                    if "timeout" not in str(e).lower():
-                        st.session_state.recording = False
-                        st.error(f"録音エラーが発生しました: {e}")
+                    error_msg = str(e).lower()
+                    if "timeout" in error_msg:
+                        # タイムアウトは正常（データがない時）
+                        logger.debug("Audio frame timeout (normal)")
+                    else:
+                        logger.warning(f"音声フレーム処理エラー: {e}")
+                        # 重大なエラーの場合のみ録音を停止
+                        if "connection" in error_msg or "stream" in error_msg:
+                            st.session_state.recording = False
+                            st.error(f"録音接続エラー: {e}")
+                            st.rerun()
         
         # 録音データ処理
         audio_buffer_available = bool(st.session_state.get('audio_buffer'))
@@ -453,11 +489,19 @@ def main():
         if st.button("🔍 音声分析", disabled=analysis_disabled):
             if st.session_state.get('audio_buffer'):
                 try:
-                    # 音声データを結合
-                    audio_data = np.concatenate(st.session_state.audio_buffer)
+                    # 音声データを結合（改善版）
+                    buffer_chunks = st.session_state.audio_buffer
+                    valid_chunks = [chunk for chunk in buffer_chunks if len(chunk) > 0]
                     
-                    if len(audio_data) > sample_rate:  # 最低1秒必要
-                        st.success("✅ 録音データを確認しました！")
+                    if not valid_chunks:
+                        st.error("有効な音声データが見つかりません。")
+                        return
+                    
+                    audio_data = np.concatenate(valid_chunks)
+                    logger.info(f"音声データ結合完了: {len(audio_data)} サンプル ({len(audio_data)/sample_rate:.1f}秒)")
+                    
+                    if len(audio_data) >= sample_rate:  # 最低1秒必要
+                        st.success(f"✅ 録音データを確認しました！ ({len(audio_data)/sample_rate:.1f}秒)")
                         
                         # 音声分析
                         with st.spinner("音声を分析中..."):
@@ -472,11 +516,15 @@ def main():
                         st.session_state.sample_rate = sample_rate
                         st.success("🎯 音声分析が完了しました！")
                     else:
-                        st.error("録音時間が短すぎます。最低1秒以上録音してください。")
+                        st.error(f"録音時間が短すぎます（{len(audio_data)/sample_rate:.1f}秒）。最低1秒以上録音してください。")
                         
                 except Exception as e:
                     logger.error(f"音声分析エラー: {e}")
                     st.error(f"音声分析中にエラーが発生しました: {e}")
+                    # デバッグ情報を表示
+                    if st.session_state.get('audio_buffer'):
+                        buffer_info = [f"チャンク{i}: {len(chunk)} サンプル" for i, chunk in enumerate(st.session_state.audio_buffer[:5])]
+                        st.info(f"バッファ情報（最初の5チャンク）: {', '.join(buffer_info)}")
             else:
                 st.error("録音データがありません。先に録音してください。")
     
@@ -485,12 +533,25 @@ def main():
         
         if st.session_state.get('audio_buffer'):
             try:
-                buffer_data = np.concatenate(st.session_state.audio_buffer)
-                duration = len(buffer_data) / sample_rate
-                st.metric("録音時間", f"{duration:.1f}秒")
-                st.metric("データサイズ", f"{len(buffer_data):,} サンプル")
-            except:
-                st.metric("録音時間", "計算中...")
+                # バッファ内の各チャンクの長さを確認
+                buffer_chunks = st.session_state.audio_buffer
+                if buffer_chunks:
+                    # 空でないチャンクのみを結合
+                    valid_chunks = [chunk for chunk in buffer_chunks if len(chunk) > 0]
+                    if valid_chunks:
+                        buffer_data = np.concatenate(valid_chunks)
+                        duration = len(buffer_data) / sample_rate
+                        st.metric("録音時間", f"{duration:.1f}秒")
+                        st.metric("データサイズ", f"{len(buffer_data):,} サンプル")
+                        st.metric("音声チャンク", f"{len(valid_chunks)} 個")
+                    else:
+                        st.metric("録音時間", "0.0秒")
+                        st.metric("データサイズ", "0 サンプル")
+                else:
+                    st.metric("録音時間", "0.0秒")
+            except Exception as e:
+                logger.warning(f"バッファ計算エラー: {e}")
+                st.metric("録音時間", "計算エラー")
         else:
             st.metric("録音時間", "0.0秒")
             
